@@ -86,6 +86,24 @@ active, allow it from link-local addresses:
 sudo ufw allow in on awdl0 from fe80::/10 to any port 8771 proto tcp
 ```
 
+### Windows
+
+Windows Wi-Fi drivers can't do monitor mode or frame injection, so AWDL
+needs a separate radio there: an ESP32 on USB, driven by
+[omdrop-owl-windows], which runs OWL on Windows against it. NearShare
+talks to it through the same helper contract as on Linux, through
+`omdrop-discoverable.exe`, which that project's planned Windows service
+provides in place of pkexec. NearShare looks for it in
+`%ProgramFiles%\omdrop-owl\`, `%ProgramFiles%\OmdropOwl\` and on
+`PATH`. Point `NEARSHARE_AIRDROP_HELPER` at it if it's elsewhere.
+
+As of 2026-10 that project has OWL working on Windows (an IPv6 ping to
+an iPhone over AWDL through an ESP32-S3), but not the helper service
+yet. Until it ships, the AirDrop switch on Windows says what's missing
+and Quick Share works as normal. The Bluetooth wake advert does work on
+Windows: the WinRT publisher accepts Apple's manufacturer data, and it
+has been seen on the air.
+
 ### Not in the snap
 
 The radio backend runs as root outside NearShare, which strict snap
@@ -198,3 +216,4 @@ is included; omdrop-owl and OWL run as a separately installed package.
 [OWL]: https://github.com/seemoo-lab/owl
 [OpenDrop]: https://github.com/seemoo-lab/opendrop
 [airdrop-mt7921]: https://github.com/jedbillyb/airdrop-mt7921
+[omdrop-owl-windows]: https://github.com/dantdmdarealguy/omdrop-owl-windows

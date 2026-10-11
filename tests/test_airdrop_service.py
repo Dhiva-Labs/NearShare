@@ -30,7 +30,8 @@ from nearshare.airdrop.manager import AirDrop  # noqa: E402
 from nearshare.airdrop.radio import Probe, Radio, RadioError  # noqa: E402
 from nearshare.airdrop.sender import AirDropPeer, AirDropSender  # noqa: E402
 from nearshare.core.connection import Events, TransferRequest  # noqa: E402
-from nearshare.core.service import NearShareService, control_socket_path  # noqa: E402
+from nearshare.core.service import NearShareService  # noqa: E402
+from tests import _control  # noqa: E402
 
 FAKE_HELPER = r"""#!/usr/bin/env bash
 dir=$(dirname "$0")
@@ -107,13 +108,7 @@ def sha256(path: Path) -> str:
 
 
 async def control(req: dict) -> dict:
-    reader, writer = await asyncio.open_unix_connection(
-        str(control_socket_path()))
-    writer.write(json.dumps(req).encode() + b"\n")
-    await writer.drain()
-    line = await asyncio.wait_for(reader.readline(), 60)
-    writer.close()
-    return json.loads(line)
+    return await _control.request(req)
 
 
 async def test_helper_contract() -> None:
@@ -280,7 +275,8 @@ async def test_service() -> None:
 
 
 async def main() -> int:
-    await test_helper_contract()
+    if os.name == "posix":      # the fake helper is a bash script
+        await test_helper_contract()
     await test_service()
     print("\nAIRDROP SERVICE TESTS PASSED")
     return 0

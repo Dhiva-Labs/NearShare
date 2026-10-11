@@ -14,8 +14,11 @@ backend that already does, through the helper contract omdrop defines
   omdrop-discoverable probe --json      what blocks this machine, if anything
 
 Backends that implement it:
-  omdrop-owl   userspace AWDL through OWL; MediaTek and Intel Wi-Fi
-  omdrop-awdl  Broadcom firmware AWDL on Apple Silicon Macs (Asahi)
+  omdrop-owl          userspace AWDL through OWL; MediaTek and Intel Wi-Fi
+  omdrop-awdl         Broadcom firmware AWDL on Apple Silicon Macs (Asahi)
+  omdrop-owl-windows  Windows, with an ESP32 as the AWDL radio; its
+                      helper is omdrop-discoverable.exe, privileged by a
+                      Windows service instead of pkexec
 
 Keeping the radio in a separately installed package keeps NearShare
 free of root helpers of its own and of the GPL radio code, and lets one
@@ -30,21 +33,34 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .protocol import AWDL_IFACE
 
+IS_WINDOWS = sys.platform == "win32"
+
 log = logging.getLogger("nearshare.airdrop.radio")
 
 HELPER_NAME = "omdrop-discoverable"
-HELPER_DIRS = ("/usr/lib/omdrop", "/usr/local/lib/omdrop")
+if IS_WINDOWS:
+    HELPER_DIRS = tuple(os.path.join(os.environ.get(var, ""), name)
+                        for var in ("ProgramFiles", "ProgramFiles(x86)")
+                        for name in ("omdrop-owl", "OmdropOwl"))
+else:
+    HELPER_DIRS = ("/usr/lib/omdrop", "/usr/local/lib/omdrop")
 PROBE_TIMEOUT = 5.0
 START_TIMEOUT = 90.0
 
-INSTALL_HINT = ("AirDrop needs an AWDL radio backend: install omdrop-owl "
-                "(MediaTek or Intel Wi-Fi) or omdrop-awdl (Apple Silicon "
-                "Macs).")
+if IS_WINDOWS:
+    INSTALL_HINT = ("AirDrop on Windows needs an ESP32 as its radio, "
+                    "driven by omdrop-owl-windows; see docs/AIRDROP.md.")
+else:
+    INSTALL_HINT = ("AirDrop needs an AWDL radio backend: install "
+                    "omdrop-owl (MediaTek or Intel Wi-Fi) or omdrop-awdl "
+                    "(Apple Silicon Macs).")
 
 
 class RadioError(Exception):
@@ -83,15 +99,35 @@ def find_helper() -> str | None:
         path = os.environ.get(var)
         if path and os.access(path, os.X_OK):
             return path
+    exe = HELPER_NAME + (".exe" if IS_WINDOWS else "")
     for directory in HELPER_DIRS:
-        path = os.path.join(directory, HELPER_NAME)
+        path = os.path.join(directory, exe)
         if os.access(path, os.X_OK):
             return path
     return shutil.which(HELPER_NAME)
 
 
+def _adapter_ipv6(iface: str) -> tuple[str, int] | None:
+    """(link-local address, interface index) through ifaddr, which is
+    how Windows exposes the AWDL adapter (awdl0 is its friendly name)."""
+    try:
+        import ifaddr
+    except ImportError:
+        return None
+    for adapter in ifaddr.get_adapters():
+        if iface not in (adapter.nice_name, adapter.name):
+            continue
+        for ip in adapter.ips:
+            if isinstance(ip.ip, tuple) and ip.ip[0].lower().startswith("fe80:"):
+                return ip.ip[0].split("%")[0], adapter.index
+    return None
+
+
 def interface_ipv6(iface: str) -> str | None:
     """awdl0's link-local address, once it is usable (not tentative)."""
+    if IS_WINDOWS:
+        found = _adapter_ipv6(iface)
+        return found[0] if found else None
     try:
         rows = Path("/proc/net/if_inet6").read_text().splitlines()
     except OSError:
@@ -106,7 +142,19 @@ def interface_ipv6(iface: str) -> str | None:
     return None
 
 
+def interface_zone(iface: str) -> str:
+    """What follows "%" in a link-local address on this interface: the
+    name on Linux, the numeric index on Windows."""
+    if IS_WINDOWS:
+        found = _adapter_ipv6(iface)
+        return str(found[1]) if found else iface
+    return iface
+
+
 def interface_mac(iface: str) -> str | None:
+    # Windows' awdl0 is a Wintun adapter: layer 3, so no MAC to read.
+    if IS_WINDOWS:
+        return None
     try:
         return Path(f"/sys/class/net/{iface}/address").read_text().strip()
     except OSError:
@@ -114,9 +162,11 @@ def interface_mac(iface: str) -> str | None:
 
 
 async def _run(*argv: str, timeout: float) -> tuple[int, str, str]:
+    extra = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **extra)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
@@ -134,8 +184,9 @@ class Radio:
                  iface: str = AWDL_IFACE, elevate: bool = True) -> None:
         self.helper = helper or find_helper()
         self.iface = iface
-        # Root via pkexec for start/stop; off for tests and when already root.
-        self.elevate = elevate and os.geteuid() != 0
+        # Root via pkexec for start/stop; off for tests, when already
+        # root, and on Windows, where the backend's service holds privilege.
+        self.elevate = elevate and not IS_WINDOWS and os.geteuid() != 0
 
     @property
     def installed(self) -> bool:
@@ -248,8 +299,12 @@ class Radio:
         """{IPv6 address: MAC} of peers in awdl0's neighbour table.
 
         OWL adds each peer it syncs with as a permanent neighbour, so this
-        finds peers without root and without waiting for mDNS.
+        finds peers without root and without waiting for mDNS. OWL on
+        Windows keeps its neighbours in-process instead, so there the
+        backend's `peers` list is the only source.
         """
+        if IS_WINDOWS:
+            return {}
         try:
             code, out, _ = await _run("ip", "-6", "neigh", "show", "dev",
                                       self.iface, timeout=PROBE_TIMEOUT)
@@ -265,6 +320,9 @@ class Radio:
 
     def address(self) -> str | None:
         return interface_ipv6(self.iface)
+
+    def zone(self) -> str:
+        return interface_zone(self.iface)
 
     def mac(self) -> str | None:
         return interface_mac(self.iface)

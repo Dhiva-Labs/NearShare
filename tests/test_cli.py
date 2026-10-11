@@ -23,6 +23,7 @@ from pathlib import Path
 
 from nearshare import cli
 from nearshare.core.connection import Events
+from nearshare.core.paths import IS_WINDOWS
 from nearshare.core.service import NearShareService, control_socket_path
 
 
@@ -51,7 +52,8 @@ async def main() -> int:
     runtime_dir = tmp / "run"
     runtime_dir.mkdir()
     os.environ["XDG_RUNTIME_DIR"] = str(runtime_dir)
-    assert control_socket_path() == runtime_dir / "nearshare.sock"
+    if not IS_WINDOWS:
+        assert control_socket_path() == runtime_dir / "nearshare.sock"
 
     service = NearShareService(device_name="cli-test-device",
                                 download_dir=tmp / "downloads",

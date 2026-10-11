@@ -33,6 +33,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import cli  # noqa: E402
+from ..core.paths import IS_WINDOWS  # noqa: E402
 from ..airdrop.radio import RadioError  # noqa: E402
 from ..airdrop.sender import AirDropPeer  # noqa: E402
 from ..core.connection import Events, TransferRequest  # noqa: E402
@@ -313,7 +314,9 @@ class NearShareWindow(Adw.ApplicationWindow):
         page.add(self._build_visibility_group())
         page.add(self._build_devices_group())
         page.add(self._build_transfers_group())
-        page.add(self._build_direct_mode_group())
+        # Direct mode drives NetworkManager; there is none on Windows.
+        if not IS_WINDOWS:
+            page.add(self._build_direct_mode_group())
         self.refresh_setup_status()
         self.update_airdrop()
         # The AirDrop window counts down, and the radio backend's probe
@@ -340,11 +343,15 @@ class NearShareWindow(Adw.ApplicationWindow):
 
         self._setup_rows: dict[str, Adw.ActionRow] = {}
         self._setup_row_icons: dict[str, Gtk.Image] = {}
-        for key, title in (
-            ("launcher_on_path", "Command-line launcher on PATH"),
-            ("desktop_entries", "Desktop app entries (app grid, search)"),
-            ("nautilus", "Nautilus right-click “Send with NearShare”"),
-        ):
+        if IS_WINDOWS:
+            items = (("launcher_on_path", "Command-line launcher on PATH"),
+                     ("desktop_entries", "Start menu entry"),
+                     ("nautilus", "Explorer “Send to ▸ NearShare”"))
+        else:
+            items = (("launcher_on_path", "Command-line launcher on PATH"),
+                     ("desktop_entries", "Desktop app entries (app grid, search)"),
+                     ("nautilus", "Nautilus right-click “Send with NearShare”"))
+        for key, title in items:
             row = Adw.ActionRow(title=title, selectable=False)
             icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
             row.add_prefix(icon)
@@ -430,6 +437,8 @@ class NearShareWindow(Adw.ApplicationWindow):
                 self._setup_row_icons[key].set_from_icon_name(
                     "dialog-information-symbolic")
 
+        # Windows has no GNOME keybinding to manage.
+        self._shortcut_row.set_visible(not status.get("windows"))
         if status["shortcut"] and status["shortcut_accel"]:
             label = cli.accelerator_label(status["shortcut_accel"])
             self._shortcut_row.set_subtitle(f"Bound: {label}")

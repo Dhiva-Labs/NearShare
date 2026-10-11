@@ -4,7 +4,8 @@ Owns the TCP receive server, the mDNS advertiser (visibility on/off), the
 mDNS browser (nearby peers), and outbound sends. Also serves a JSON-lines
 control socket at $XDG_RUNTIME_DIR/nearshare.sock so the `nearshare`
 CLI can toggle visibility, query status, and start sends against the
-running app:
+running app (on Windows, a token-guarded loopback TCP port instead; see
+control.py):
 
     {"cmd": "status"}                      -> {"visible": true, ...}
     {"cmd": "on"} / {"cmd": "off"} / {"cmd": "toggle"}
@@ -34,7 +35,11 @@ from ..airdrop.sender import AirDropPeer, SendError
 from .ble import BleAdvertiser, BleScanner, BleUnavailable
 from .connection import (Events, InboundConnection, OutboundConnection,
                          random_endpoint_id)
+from .control import AlreadyRunning, ControlServer, control_socket_path
 from .mdns import Advertiser, Browser, Peer
+
+__all__ = ["AlreadyRunning", "NearShareService", "control_socket_path",
+           "default_device_name"]
 
 log = logging.getLogger("nearshare.service")
 
@@ -44,50 +49,9 @@ log = logging.getLogger("nearshare.service")
 MAX_CONCURRENT_INBOUND = 8
 
 
-def control_socket_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return Path(runtime) / "nearshare.sock"
-
-
-class AlreadyRunning(RuntimeError):
-    """Another instance already owns the control socket.
-
-    Without this check every launch would happily start a second full
-    service: a second mDNS advertisement, a second TCP listener and a
-    second BLE beacon, so phones list this machine once per running
-    instance. Raised by start() before anything is advertised.
-    """
-
-
-async def _instance_is_alive(path: Path) -> bool:
-    """True if something is actually serving the control socket.
-
-    A socket file left behind by a killed process still `exists()`, so
-    liveness has to be probed by connecting, not by stat-ing.
-    """
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(str(path)), timeout=2)
-    except (ConnectionRefusedError, FileNotFoundError, OSError,
-            asyncio.TimeoutError):
-        return False
-    try:
-        writer.write(json.dumps({"cmd": "status"}).encode() + b"\n")
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=2)
-        return bool(line.strip())
-    except (OSError, asyncio.TimeoutError):
-        return False
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (OSError, asyncio.TimeoutError):
-            pass
-
-
 def default_device_name() -> str:
-    return f"{os.environ.get('USER', 'user')}@{socket.gethostname()}"
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+    return f"{user}@{socket.gethostname()}"
 
 
 class NearShareService:
@@ -100,7 +64,7 @@ class NearShareService:
         self.endpoint_id = random_endpoint_id()
         self.port: int | None = None
         self._server: asyncio.Server | None = None
-        self._control: asyncio.Server | None = None
+        self._control = ControlServer(self._handle_control)
         self._advertiser: Advertiser | None = None
         self._ble = BleAdvertiser()
         self.ble_status = "off"  # "on", "off", or "unavailable: <why>"
@@ -145,13 +109,10 @@ class NearShareService:
         if self._ble_scanner.active:
             await asyncio.to_thread(self._ble_scanner.stop)
         await self.browser.stop()
-        for server in (self._server, self._control):
-            if server is not None:
-                server.close()
-                await server.wait_closed()
-        sock = control_socket_path()
-        if sock.exists():
-            sock.unlink()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+        await self._control.stop()
 
     # ------------------------------------------------------------ visibility
 
@@ -274,27 +235,7 @@ class NearShareService:
     # ------------------------------------------------------------ control API
 
     async def _start_control_socket(self) -> None:
-        path = control_socket_path()
-        if path.exists():
-            if await _instance_is_alive(path):
-                raise AlreadyRunning(
-                    "another NearShare instance is already running")
-            # Nothing listening: a previous run was killed without
-            # cleaning up. Safe to take the stale socket over.
-            path.unlink()
-        # bind() creates the socket file with mode 0777 & ~umask, so with
-        # a typical 022 umask it's briefly group/world-accessible before
-        # the chmod below runs. The control socket accepts a "send"
-        # command that can push any file the daemon's user can read to
-        # any LAN peer, so close that window instead of just narrowing it
-        # after the fact.
-        old_umask = os.umask(0o177)
-        try:
-            self._control = await asyncio.start_unix_server(
-                self._handle_control, path=str(path))
-        finally:
-            os.umask(old_umask)
-        path.chmod(0o600)
+        await self._control.start()
 
     async def _handle_control(self, reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> None:
@@ -320,6 +261,9 @@ class NearShareService:
                 # an object: req.get("cmd") below would otherwise raise
                 # AttributeError and crash this connection's task.
                 writer.write(b'{"error": "request must be a JSON object"}\n')
+                return
+            if not self._control.authorised(req):
+                writer.write(b'{"error": "not authorised"}\n')
                 return
             resp = await self._dispatch_control(req)
             writer.write(json.dumps(resp).encode() + b"\n")

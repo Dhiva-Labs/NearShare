@@ -35,9 +35,7 @@ Two independently-varying things, each with its own fallback:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -89,7 +87,8 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from ..core.connection import Events, OutboundConnection  # noqa: E402
 from ..core.mdns import Peer  # noqa: E402
-from ..core.service import (NearShareService, control_socket_path,  # noqa: E402
+from ..core import control  # noqa: E402
+from ..core.service import (NearShareService,  # noqa: E402
                             default_device_name)
 from .asyncio_glue import AsyncioThread, idle  # noqa: E402
 
@@ -109,28 +108,9 @@ AIRDROP = "airdrop"
 
 def _control_request(req: dict[str, Any],
                      timeout: float = SOCKET_TIMEOUT) -> dict[str, Any] | None:
-    """Same shape as cli.py's helper of the same name, duplicated rather
-    than imported so this module has no dependency on cli.py's internals
-    (it's launched standalone, not through cli.main())."""
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect(str(control_socket_path()))
-    except OSError:
-        return None
-    try:
-        sock.sendall(json.dumps(req).encode() + b"\n")
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf) if buf else {"error": "empty response"}
-    except OSError as exc:
-        return {"error": str(exc)}
-    finally:
-        sock.close()
+    """One request to the running app over its control channel, or None
+    when no app is listening (see core/control.py)."""
+    return control.request(req, timeout)
 
 
 def _peer_from_socket_dict(d: dict[str, Any]) -> Peer:

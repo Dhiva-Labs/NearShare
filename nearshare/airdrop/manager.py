@@ -141,7 +141,7 @@ class AirDrop:
                 self.receiver = AirDropReceiver(
                     self.device_name, self.download_dir, self.events,
                     self.identity, model=self.model,
-                    host=protocol.scoped(address, self.radio.iface),
+                    host=protocol.scoped(address, self.radio.zone()),
                     port=self.receiver_port)
                 try:
                     await self.receiver.start()
@@ -280,16 +280,17 @@ class AirDrop:
         awdl0's neighbour table, each address derived or read directly."""
         found: dict[str, AirDropPeer] = {}
         own = (self.radio.mac() or "").lower()
+        zone = self.radio.zone()
         for address, mac in (await self.radio.neighbours()).items():
             if mac != own:
                 found[mac] = AirDropPeer(address=address, mac=mac,
                                          port=self.peer_port,
-                                         iface=self.radio.iface)
+                                         iface=zone)
         for mac in await self.radio.peers():
             if mac != own and mac not in found:
                 found[mac] = AirDropPeer(
                     address=protocol.eui64_link_local(mac), mac=mac,
-                    port=self.peer_port, iface=self.radio.iface)
+                    port=self.peer_port, iface=zone)
         return found
 
     def match_peer(self, needle: str) -> AirDropPeer | None:

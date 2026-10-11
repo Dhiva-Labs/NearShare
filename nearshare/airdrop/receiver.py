@@ -26,7 +26,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core.connection import Events, FileOffer, TransferRequest
+from ..core.connection import (NEW_FILE_FLAGS, Events, FileOffer,
+                               TransferRequest)
 from . import protocol
 from .archive import ArchiveError, ArchiveTooLarge, BodyDecoder, CpioReader
 from .http import (HttpError, Request, continue_bytes, iter_body, read_body,
@@ -71,8 +72,7 @@ def open_unique(directory: Path, name: str):
     for n in range(10000):
         candidate = directory / (name if n == 0 else f"{stem} ({n}){ext}")
         try:
-            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                         os.O_NOFOLLOW, 0o600)
+            fd = os.open(candidate, NEW_FILE_FLAGS, 0o600)
         except FileExistsError:
             continue
         return candidate, os.fdopen(fd, "wb")

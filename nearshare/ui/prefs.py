@@ -13,16 +13,16 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
+
+from ..core.paths import config_dir
 from typing import Any
 
 log = logging.getLogger("nearshare.ui.prefs")
 
 
 def _state_path() -> Path:
-    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(config_home) / "nearshare" / "ui-state.json"
+    return config_dir() / "ui-state.json"
 
 
 def _load() -> dict[str, Any]:

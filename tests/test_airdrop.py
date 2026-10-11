@@ -140,7 +140,8 @@ async def raw_post(port: int, ctx, path: str, headers: list, body) -> int:
 async def test_transfers(tmp: Path) -> None:
     downloads = tmp / "downloads"
     identity = load_or_create(tmp / "identity")
-    assert (tmp / "identity" / "key.pem").stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert (tmp / "identity" / "key.pem").stat().st_mode & 0o777 == 0o600
 
     answers: list[bool] = []
     asked: list[TransferRequest] = []

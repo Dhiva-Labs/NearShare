@@ -86,6 +86,14 @@ def write_frame(writer: asyncio.StreamWriter, data: bytes) -> None:
     writer.write(len(data).to_bytes(4, "big") + data)
 
 
+# Flags for creating a received file: ours alone (O_EXCL), never through
+# a symlink planted in the download directory (O_NOFOLLOW, POSIX only),
+# and byte-for-byte (O_BINARY: without it Windows opens the descriptor in
+# text mode and every "\n" written becomes "\r\n").
+NEW_FILE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                  getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+
+
 def random_endpoint_id() -> str:
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
@@ -473,8 +481,7 @@ class InboundConnection(_ConnectionBase):
         # symlink planted in the download directory (a dangling symlink
         # reports exists() == False, so the loop above would not catch
         # it and a plain open() would write through it).
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                     os.O_NOFOLLOW, 0o600)
+        fd = os.open(dest, NEW_FILE_FLAGS, 0o600)
         offer.handle = os.fdopen(fd, "wb")
 
     async def _receive_payloads(self, request: TransferRequest,

@@ -21,6 +21,7 @@ from nearshare.core.connection import (Events, FileOffer, InboundConnection,
 import nearshare.core.connection as connection_mod
 from nearshare.core.crypto import HandshakeError
 from nearshare.core.service import NearShareService, control_socket_path
+from tests import _control
 from nearshare.proto import offline_wire_formats_pb2 as ow
 from nearshare.proto import wire_format_pb2 as wf
 from tests.test_payload_routing import (FakeSender, connect_sender, finish,
@@ -368,11 +369,9 @@ async def test_control_socket_handles_malformed_input() -> None:
     service = NearShareService(device_name="badinput", download_dir=downloads)
     await service.start(visible=False)
     try:
-        sock = control_socket_path()
-
         # Valid JSON, but not an object -- req.get("cmd") would otherwise
         # raise AttributeError inside the connection task.
-        reader, writer = await asyncio.open_unix_connection(str(sock))
+        reader, writer = await _control.open_raw()
         writer.write(b"[1, 2, 3]\n")
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout=5)
@@ -381,7 +380,7 @@ async def test_control_socket_handles_malformed_input() -> None:
 
         # A line with no trailing newline that blows past the
         # StreamReader's buffer limit -- readline() raises ValueError.
-        reader, writer = await asyncio.open_unix_connection(str(sock))
+        reader, writer = await _control.open_raw()
         writer.write(b"A" * (200 * 1024))
         await writer.drain()
         try:
@@ -391,8 +390,8 @@ async def test_control_socket_handles_malformed_input() -> None:
         writer.close()
 
         # The service itself must still be alive and answering normally.
-        reader, writer = await asyncio.open_unix_connection(str(sock))
-        writer.write(b'{"cmd": "status"}\n')
+        reader, writer = await _control.open_raw()
+        writer.write(_control.encode({"cmd": "status"}))
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout=5)
         assert b'"device_name": "badinput"' in line, line

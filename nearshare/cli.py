@@ -23,14 +23,14 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from .core.mdns import Peer
-from .core.service import control_socket_path
+from .core import control
+from .core.paths import IS_WINDOWS
 
 SOCKET_TIMEOUT = 5.0
 PEER_WAIT_TIMEOUT = 20.0
@@ -73,26 +73,8 @@ def _desktop_file_names() -> list[str]:
 def _control_request(req: dict[str, Any],
                      timeout: float = SOCKET_TIMEOUT) -> dict[str, Any] | None:
     """Send one JSON request to the running app; return its JSON response,
-    or None if no app is listening on the control socket."""
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect(str(control_socket_path()))
-    except OSError:
-        return None
-    try:
-        sock.sendall(json.dumps(req).encode() + b"\n")
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf) if buf else {"error": "empty response"}
-    except OSError as exc:
-        return {"error": str(exc)}
-    finally:
-        sock.close()
+    or None if no app is listening on the control channel."""
+    return control.request(req, timeout)
 
 
 def _not_running() -> int:
@@ -100,9 +82,25 @@ def _not_running() -> int:
     return 1
 
 
+def _gui_python() -> str:
+    """The interpreter to run the GUI with: pythonw on Windows, so no
+    console window opens behind the app."""
+    exe = Path(sys.executable)
+    if IS_WINDOWS and exe.with_name("pythonw.exe").exists():
+        return str(exe.with_name("pythonw.exe"))
+    return str(exe)
+
+
 def _launch_gui() -> None:
     """Start the GUI app detached, so the CLI/shortcut can return right
     away and the app keeps running after this process exits."""
+    if IS_WINDOWS:
+        subprocess.Popen([_gui_python(), "-m", "nearshare"], cwd=PROJECT_ROOT,
+                         creationflags=(subprocess.DETACHED_PROCESS |
+                                        subprocess.CREATE_NEW_PROCESS_GROUP),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+        return
     subprocess.Popen([sys.executable, "-m", "nearshare"],
                      start_new_session=True, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1131,7 +1129,18 @@ def integration_status() -> dict[str, Any]:
     integration can never be done from inside the app (see module
     docstring), so completeness there only requires what IS possible
     (the launcher already being on PATH via /snap/bin, and the
-    shortcut)."""
+    shortcut). On Windows "desktop_entries" is the Start menu shortcut
+    and "nautilus" the Explorer "Send to" entry."""
+    if IS_WINDOWS:
+        done = {key: lnk.exists()
+                for key, (lnk, _args, _desc) in _windows_shortcuts().items()}
+        complete = all(done.values())
+        return {"snap": False, "windows": True, "launcher_on_path": True,
+                "desktop_entries": done["start_menu"],
+                "nautilus": done["send_to"], "shortcut": False,
+                "shortcut_accel": None, "shortcut_fixable": False,
+                "home_fixable": True, "nautilus_fixable": True,
+                "anything_fixable": not complete, "complete": complete}
     snap = _in_snap()
     # Inside the snap the sandbox's own PATH doesn't contain /snap/bin,
     # so which() misses the launcher the user's shell can actually see.
@@ -1265,7 +1274,66 @@ def _install_full(shortcut: bool, key: str | None) -> int:
     return 0
 
 
+# ------------------------------------------------------------- windows
+
+def _windows_shortcuts() -> dict[str, tuple[Path, list[str], str]]:
+    """Start menu entry and Explorer "Send to" entry (Explorer appends
+    the chosen files to the Send-to target's arguments)."""
+    appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming")
+    windows = appdata / "Microsoft" / "Windows"
+    return {
+        "start_menu": (windows / "Start Menu" / "Programs" / "NearShare.lnk",
+                       ["-m", "nearshare"], "NearShare: Quick Share and AirDrop"),
+        "send_to": (windows / "SendTo" / "NearShare.lnk",
+                    ["-m", "nearshare.cli", "send-picker"],
+                    "Send with NearShare"),
+    }
+
+
+def _make_windows_shortcut(lnk: Path, args: list[str], description: str) -> None:
+    # Values travel in environment variables, so no quoting of paths with
+    # spaces or apostrophes inside the PowerShell source is ever needed.
+    script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:NS_LNK);"
+              "$s.TargetPath = $env:NS_TARGET; $s.Arguments = $env:NS_ARGS;"
+              "$s.WorkingDirectory = $env:NS_CWD; $s.Description = $env:NS_DESC;"
+              "$s.Save()")
+    lnk.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "NS_LNK": str(lnk), "NS_TARGET": _gui_python(),
+           "NS_ARGS": subprocess.list2cmdline(args), "NS_CWD": str(PROJECT_ROOT),
+           "NS_DESC": description}
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    script], env=env, check=True, capture_output=True,
+                   creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+
+
+def _install_windows() -> int:
+    print("Installing NearShare shortcuts...")
+    failed = False
+    for lnk, args, description in _windows_shortcuts().values():
+        try:
+            _make_windows_shortcut(lnk, args, description)
+            print(f"  created {lnk}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failed = True
+            print(f"  could not create {lnk}: {exc}")
+    print("\nRight-click files in Explorer and choose Send to > NearShare "
+          "to send them.")
+    return 1 if failed else 0
+
+
+def _uninstall_windows() -> int:
+    for lnk, _args, _description in _windows_shortcuts().values():
+        try:
+            lnk.unlink()
+            print(f"  removed {lnk}")
+        except FileNotFoundError:
+            pass
+    return 0
+
+
 def _run_install(shortcut: bool, key: str | None = None) -> int:
+    if IS_WINDOWS:
+        return _install_windows()
     layout = _install_layout()
     if layout == "snap":
         return _install_snap(shortcut, key)
@@ -1339,6 +1407,8 @@ def _uninstall_system() -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    if IS_WINDOWS:
+        return _uninstall_windows()
     layout = _install_layout()
     if layout == "snap":
         return _uninstall_snap()

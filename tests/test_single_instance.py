@@ -17,8 +17,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from nearshare.core.service import (AlreadyRunning, NearShareService,
-                                    control_socket_path)
+from nearshare.core import control
+from nearshare.core.paths import IS_WINDOWS
+from nearshare.core.service import AlreadyRunning, NearShareService
+
+from tests import _control
 
 
 async def main() -> int:
@@ -41,20 +44,19 @@ async def main() -> int:
         return 1
 
     # The first instance must be untouched and still serving.
-    sock = control_socket_path()
-    assert sock.exists(), "first instance's socket was removed"
-    reader, writer = await asyncio.open_unix_connection(str(sock))
-    writer.write(b'{"cmd": "status"}\n')
-    await writer.drain()
-    line = await asyncio.wait_for(reader.readline(), timeout=5)
-    writer.close()
-    assert b'"device_name": "first"' in line, line
+    marker = control._info_path() if IS_WINDOWS else control.control_socket_path()
+    assert marker.exists(), "first instance's control endpoint was removed"
+    status = await _control.request({"cmd": "status"}, timeout=5)
+    assert status.get("device_name") == "first", status
     print("first instance still serving its control socket")
     await first.stop()
 
     # --- a stale socket must be reclaimed, not treated as live ---------
-    sock.parent.mkdir(parents=True, exist_ok=True)
-    sock.touch()  # looks like a socket file, nothing listening
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if IS_WINDOWS:   # a control.json naming a port nobody listens on
+        marker.write_text('{"port": 9, "token": "stale", "pid": 1}')
+    else:
+        marker.touch()  # looks like a socket file, nothing listening
     third = NearShareService(device_name="third", download_dir=downloads)
     try:
         await third.start(visible=False)

@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from pathlib import Path
+
+from .paths import config_dir
 
 log = logging.getLogger("nearshare.names")
 
@@ -25,9 +26,7 @@ _cache: dict[str, str] | None = None
 
 
 def _path() -> Path:
-    config = os.environ.get("XDG_CONFIG_HOME",
-                            str(Path.home() / ".config"))
-    return Path(config) / "nearshare" / "known_devices.json"
+    return config_dir() / "known_devices.json"
 
 
 def _load() -> dict[str, str]:

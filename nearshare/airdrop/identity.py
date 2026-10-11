@@ -9,7 +9,9 @@ which is what "Contacts Only" requires. That cannot be produced off
 Apple hardware, so NearShare only ever speaks Everyone mode, and this
 module just keeps one self-signed RSA pair, created on first use.
 
-Stored at $XDG_DATA_HOME/nearshare/airdrop/{key.pem,cert.pem}, 0600.
+Stored in NearShare's data directory under airdrop/{key.pem,cert.pem},
+0600 ($XDG_DATA_HOME/nearshare on Linux, %LOCALAPPDATA%\\NearShare on
+Windows).
 """
 
 from __future__ import annotations
@@ -22,13 +24,13 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core.paths import data_dir
+
 log = logging.getLogger("nearshare.airdrop.identity")
 
 
 def identity_dir() -> Path:
-    data_home = os.environ.get("XDG_DATA_HOME") or str(
-        Path.home() / ".local" / "share")
-    return Path(data_home) / "nearshare" / "airdrop"
+    return data_dir() / "airdrop"
 
 
 @dataclass
