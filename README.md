@@ -7,6 +7,8 @@ speaks Google's wire protocol directly, so it interoperates with:
 - **Windows** Quick Share
 - **macOS** NearDrop
 - **itself**, Linux ↔ Linux
+- **iPhone, iPad and Mac** over AirDrop, with an AWDL radio backend
+  installed (see [docs/AIRDROP.md](docs/AIRDROP.md))
 
 No cables, no cloud account, no companion app on the phone — just a shared
 WiFi network (or NearShare's own experimental hotspot, see [Direct
@@ -19,6 +21,7 @@ screens.
 - [Install](#install)
 - [Usage](#usage)
 - [Direct mode (experimental)](#direct-mode-experimental)
+- [AirDrop](docs/AIRDROP.md)
 - [Limitations](#limitations)
 - [Security notes](#security-notes)
 
@@ -293,7 +296,14 @@ nearshare toggle            # flip visibility (fires a desktop notification)
 nearshare peers             # list currently-discoverable nearby devices
 nearshare send photo.jpg report.pdf --to "Pixel 8"
 nearshare send photo.jpg    # only one nearby peer? --to is optional
+
+nearshare airdrop on        # visible to Apple devices for 10 minutes
+nearshare airdrop peers     # look for nearby iPhones, iPads and Macs
+nearshare send photo.jpg --to "iPhone" --via airdrop
 ```
+
+The `airdrop` commands need an AWDL radio backend; see
+[docs/AIRDROP.md](docs/AIRDROP.md).
 
 Every subcommand accepts `--json` for scripting (raw JSON response
 instead of the human-readable summary). `status`'s response includes a
@@ -409,6 +419,10 @@ claim of origin.
 This is an independent, unofficial client that implements the publicly
 documented and community-reverse-engineered Nearby Share wire protocol
 for interoperability purposes.
+
+**AirDrop** is a trademark of Apple Inc. NearShare is not affiliated
+with Apple; the name only describes the protocol it interoperates with.
+AirDrop's credits are in [docs/AIRDROP.md](docs/AIRDROP.md#credits).
 
 ### Credits
 
