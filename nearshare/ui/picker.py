@@ -98,6 +98,13 @@ log = logging.getLogger("nearshare.ui.picker")
 PROBE_TIMEOUT = 1.5   # quick "is the app running" check
 SOCKET_TIMEOUT = 5.0  # normal peers-poll request/response
 POLL_INTERVAL_S = 2
+# An AirDrop send goes through the running app's `send` command, whose
+# answer arrives only once the recipient has accepted and the files are
+# across.
+AIRDROP_SEND_TIMEOUT = 3600.0
+# Marks a Peer built from an AirDrop entry of the `peers` response; such a
+# peer is sent to through the app, never by an in-process connection.
+AIRDROP = "airdrop"
 
 
 def _control_request(req: dict[str, Any],
@@ -131,7 +138,8 @@ def _peer_from_socket_dict(d: dict[str, Any]) -> Peer:
     needs (host/port) to send directly; endpoint_id isn't included (it's
     only used for peer *matching*, which we don't need -- we already
     have the exact peer picked by the user) so it's left blank."""
-    return Peer(instance=d.get("instance", ""), endpoint_id="",
+    return Peer(instance=d.get("instance", ""),
+               endpoint_id=AIRDROP if d.get("protocol") == AIRDROP else "",
                device_name=d.get("name", "Unknown device"),
                device_type=d.get("type", 0), host=d["host"], port=d["port"])
 
@@ -235,7 +243,7 @@ class PickerWindow(Adw.ApplicationWindow):
 
     def _update_peer_row(self, row: Adw.ActionRow, peer: Peer) -> None:
         row.set_title(peer.device_name)
-        row.set_subtitle(peer.host)
+        row.set_subtitle("AirDrop" if peer.endpoint_id == AIRDROP else peer.host)
 
     def _add_peer_row(self, peer: Peer) -> Adw.ActionRow:
         row = Adw.ActionRow()
@@ -259,7 +267,9 @@ class PickerWindow(Adw.ApplicationWindow):
     def _start_send(self, peer: Peer) -> None:
         self.progress_title.set_text(f"Sending to {peer.device_name}")
         self.pin_label.set_text("")
-        self.result_label.set_text("Connecting…")
+        self.result_label.set_text(
+            f"Waiting for {peer.device_name} to accept…"
+            if peer.endpoint_id == AIRDROP else "Connecting…")
         self.progress_bar.set_fraction(0.0)
         self.close_button.set_visible(False)
         self.stack.set_visible_child_name("progress")
@@ -347,6 +357,12 @@ class PickerApplication(Adw.Application):
         def after(result, _exc) -> None:
             if result is not None and "error" not in result:
                 self.device_name = result.get("device_name")
+                if (result.get("airdrop") or {}).get("visible"):
+                    # The app only looks for Apple devices on request.
+                    self.asyncio_thread.run_coroutine(asyncio.to_thread(
+                        _control_request, {"cmd": "airdrop",
+                                           "action": "discover",
+                                           "seconds": 120}))
                 self._start_socket_polling()
             else:
                 self._start_ephemeral_browser()
@@ -370,8 +386,11 @@ class PickerApplication(Adw.Application):
         if result is None or "error" in result:
             self.window.show_connection_lost()
             return
+        # An Apple device that hasn't answered with its name yet isn't
+        # one a send is likely to reach; list it once it has.
         peers = {d.get("instance", d["host"]): _peer_from_socket_dict(d)
-                for d in result.get("peers", [])}
+                for d in result.get("peers", [])
+                if d.get("named", True)}
         self.window.update_peers(peers)
 
     def _start_ephemeral_browser(self) -> None:
@@ -387,6 +406,9 @@ class PickerApplication(Adw.Application):
         self.asyncio_thread.run_coroutine(self._run_send(peer, files))
 
     async def _run_send(self, peer: Peer, files: list[Path]) -> None:
+        if peer.endpoint_id == AIRDROP:
+            await self._run_airdrop_send(peer, files)
+            return
         device_name = self.device_name or default_device_name()
         events = Events(on_progress=lambda dev, done, total: idle(
             self._safe_window_call("on_progress", done, total)))
@@ -404,6 +426,21 @@ class PickerApplication(Adw.Application):
             idle(self._safe_window_call("show_result", True, None))
         except Exception as exc:
             idle(self._safe_window_call("show_result", False, str(exc)))
+
+    async def _run_airdrop_send(self, peer: Peer, files: list[Path]) -> None:
+        """Through the running app, which owns the AirDrop link: no
+        progress comes back, only the outcome."""
+        resp = await asyncio.to_thread(
+            _control_request,
+            {"cmd": "send", "peer": peer.instance, "protocol": AIRDROP,
+             "files": [str(f) for f in files]}, AIRDROP_SEND_TIMEOUT)
+        if resp is None:
+            idle(self._safe_window_call("show_result", False,
+                                        "the NearShare app stopped"))
+        elif "error" in resp:
+            idle(self._safe_window_call("show_result", False, resp["error"]))
+        else:
+            idle(self._safe_window_call("show_result", True, None))
 
 
 def main(files: list[str]) -> int:

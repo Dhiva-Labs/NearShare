@@ -33,6 +33,8 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import cli  # noqa: E402
+from ..airdrop.radio import RadioError  # noqa: E402
+from ..airdrop.sender import AirDropPeer  # noqa: E402
 from ..core.connection import Events, TransferRequest  # noqa: E402
 from ..core.hotspot import Hotspot, HotspotError  # noqa: E402
 from ..core.mdns import Peer  # noqa: E402
@@ -59,6 +61,18 @@ BUS_ID = (os.environ.get("SNAP_INSTANCE_NAME", APP_ID)
           if os.environ.get("SNAP") else APP_ID)
 
 _DEVICE_TYPE_NAMES = {0: "Unknown device", 1: "Phone", 2: "Tablet", 3: "Laptop"}
+
+
+def _peer_name(peer: "Peer | AirDropPeer") -> str:
+    return peer.display_name if isinstance(peer, AirDropPeer) else peer.device_name
+
+
+def _apple_device_kind(model: str | None) -> str:
+    """"iPhone17,1" -> "iPhone"; Apple model identifiers lead with it."""
+    for kind in ("iPhone", "iPad", "MacBook", "iMac", "Mac", "Watch", "Vision"):
+        if model and model.startswith(kind):
+            return "Mac" if kind in ("MacBook", "iMac") else kind
+    return "Apple device"
 
 
 def _human_size(n: int) -> str:
@@ -224,6 +238,11 @@ class NearShareWindow(Adw.ApplicationWindow):
         self.app = application
         self._peer_rows: dict[str, Adw.ActionRow] = {}
         self._peers: dict[str, Peer] = {}
+        # Apple devices found over AirDrop, keyed "airdrop:<mac>" so they
+        # never collide with a Quick Share instance name.
+        self._airdrop_rows: dict[str, Adw.ActionRow] = {}
+        self._airdrop_peers: dict[str, AirDropPeer] = {}
+        self._updating_airdrop_switch = False
         # One row per (device, direction) *active* transfer, updated in
         # place as progress events arrive (done/total are cumulative
         # across the whole batch, not per-file -- see connection.py's
@@ -296,6 +315,10 @@ class NearShareWindow(Adw.ApplicationWindow):
         page.add(self._build_transfers_group())
         page.add(self._build_direct_mode_group())
         self.refresh_setup_status()
+        self.update_airdrop()
+        # The AirDrop window counts down, and the radio backend's probe
+        # finishes after startup; a cheap periodic refresh covers both.
+        GLib.timeout_add_seconds(5, self._airdrop_tick)
 
     def _build_setup_group(self) -> Adw.PreferencesGroup:
         """The "Finish setup" group: lists whatever piece of `nearshare
@@ -480,13 +503,25 @@ class NearShareWindow(Adw.ApplicationWindow):
         self._ble_health_row.add_prefix(
             Gtk.Image.new_from_icon_name("dialog-warning-symbolic"))
         group.add(self._ble_health_row)
+
+        self.airdrop_row = Adw.SwitchRow(
+            title="Visible to Apple devices",
+            subtitle="AirDrop")
+        self.airdrop_row.set_tooltip_text(
+            "When on, nearby iPhones, iPads and Macs with AirDrop set to "
+            "Everyone can see this device for a few minutes, and you can "
+            "send to them. Needs an AWDL radio backend (omdrop-owl).")
+        self.airdrop_row.connect("notify::active",
+                                 self._on_airdrop_switch_toggled)
+        group.add(self.airdrop_row)
         return group
 
     def _build_devices_group(self) -> Adw.PreferencesGroup:
         self.devices_group = Adw.PreferencesGroup(
             title="Nearby devices",
             description="Devices with Quick Share receiving open on the "
-                        "same network.")
+                        "same network, and Apple devices while AirDrop "
+                        "is on.")
 
         # Discovery has no "I've started looking and found nothing yet"
         # event (mdns.Browser only calls back on an actual change), so
@@ -521,7 +556,7 @@ class NearShareWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE  # one-shot
 
     def _update_devices_empty_state(self) -> None:
-        has_peers = bool(self._peers)
+        has_peers = bool(self._peers) or bool(self._airdrop_rows)
         self._searching_status.set_visible(
             not has_peers and not self._devices_settled)
         self._empty_devices_status.set_visible(
@@ -664,6 +699,81 @@ class NearShareWindow(Adw.ApplicationWindow):
         self.app.asyncio_thread.run_coroutine(
             self.app.service.set_visible(wanted))
 
+    # ------------------------------------------------------------ airdrop
+
+    def _airdrop_tick(self) -> bool:
+        self.update_airdrop()
+        return GLib.SOURCE_CONTINUE
+
+    def update_airdrop(self) -> None:
+        """Mirror the AirDrop window's state into its switch row."""
+        status = self.app.service.airdrop.status()
+        state = status["state"]
+        self._updating_airdrop_switch = True
+        try:
+            self.airdrop_row.set_active(state in ("on", "starting"))
+        finally:
+            self._updating_airdrop_switch = False
+        self.airdrop_row.set_sensitive(state in ("on", "off"))
+        if state == "on":
+            remaining = status.get("remaining")
+            if isinstance(remaining, int):
+                minutes = max(1, round(remaining / 60))
+                subtitle = (f"AirDrop — visible for {minutes} more "
+                            f"minute{'s' if minutes != 1 else ''}")
+            else:
+                subtitle = "AirDrop — visible until turned off"
+        elif state == "starting":
+            subtitle = "AirDrop — starting the radio…"
+        elif state == "stopping":
+            subtitle = "AirDrop — stopping…"
+        elif status.get("ready") is False and status.get("explain"):
+            subtitle = f"AirDrop unavailable — {status['explain']}"
+        else:
+            subtitle = "AirDrop — off"
+        self.airdrop_row.set_subtitle(subtitle)
+
+    def _on_airdrop_switch_toggled(self, row: Adw.SwitchRow, _pspec) -> None:
+        if self._updating_airdrop_switch:
+            return
+        wanted = row.get_active()
+        airdrop = self.app.service.airdrop
+
+        async def change() -> None:
+            await airdrop.set_visible(wanted)
+            if wanted:
+                # Turning AirDrop on is usually about to share something:
+                # start looking for Apple devices straight away.
+                await airdrop.discover(120)
+
+        def after(_result, exc: BaseException | None) -> None:
+            self.update_airdrop()
+            if exc is not None:
+                message = (str(exc) if isinstance(exc, RadioError)
+                           else f"Unexpected error: {exc}")
+                dialog = Adw.AlertDialog.new("AirDrop couldn't start", message)
+                dialog.add_response("ok", "OK")
+                dialog.set_close_response("ok")
+                dialog.choose(self, None, lambda *_: None)
+
+        self.app.asyncio_thread.run_coroutine(change(), after)
+        self.update_airdrop()
+
+    def update_airdrop_peers(self, peers: dict[str, AirDropPeer]) -> None:
+        """Only devices that told us their name get a row: one that never
+        answered /Discover is not one a send is likely to reach."""
+        named = {f"airdrop:{k}": p for k, p in peers.items() if p.name}
+        self._airdrop_peers = named
+        for key in [k for k in self._airdrop_rows if k not in named]:
+            self.devices_group.remove(self._airdrop_rows.pop(key))
+        for key, peer in named.items():
+            if key in self._airdrop_rows:
+                self._update_peer_row(self._airdrop_rows[key], peer)
+            else:
+                self._airdrop_rows[key] = self._add_peer_row(key, peer)
+        self._devices_settled = True
+        self._update_devices_empty_state()
+
     # ------------------------------------------------------------- peers
 
     def update_peers(self, peers: dict[str, Peer]) -> None:
@@ -681,7 +791,12 @@ class NearShareWindow(Adw.ApplicationWindow):
         self._devices_settled = True
         self._update_devices_empty_state()
 
-    def _update_peer_row(self, row: Adw.ActionRow, peer: Peer) -> None:
+    def _update_peer_row(self, row: Adw.ActionRow,
+                         peer: Peer | AirDropPeer) -> None:
+        if isinstance(peer, AirDropPeer):
+            row.set_title(peer.display_name)
+            row.set_subtitle(f"AirDrop • {_apple_device_kind(peer.model)}")
+            return
         row.set_title(peer.device_name)
         row.set_subtitle(
             f"{_DEVICE_TYPE_NAMES.get(peer.device_type, 'Device')} "
@@ -714,10 +829,10 @@ class NearShareWindow(Adw.ApplicationWindow):
         return row
 
     def _on_send_clicked(self, key: str) -> None:
-        peer = self._peers.get(key)
+        peer = self._peers.get(key) or self._airdrop_peers.get(key)
         if peer is None:
             return  # peer vanished between click and callback
-        dialog = Gtk.FileDialog(title=f"Send files to {peer.device_name}")
+        dialog = Gtk.FileDialog(title=f"Send files to {_peer_name(peer)}")
 
         def on_chosen(source: Gtk.FileDialog, result: Gio.AsyncResult,
                      _data=None) -> None:
@@ -736,11 +851,12 @@ class NearShareWindow(Adw.ApplicationWindow):
 
         dialog.open_multiple(self, None, on_chosen)
 
-    def _start_send(self, peer: Peer, files: list[Path]) -> None:
-        key = (peer.device_name, "send")
+    def _start_send(self, peer: Peer | AirDropPeer,
+                    files: list[Path]) -> None:
+        name = _peer_name(peer)
+        key = (name, "send")
         total = sum(f.stat().st_size for f in files if f.is_file())
-        row = self._new_active_row(key, f"Sending to {peer.device_name}",
-                                   total)
+        row = self._new_active_row(key, f"Sending to {name}", total)
 
         def after(_result, exc: BaseException | None) -> None:
             # Success/failure UI is normally driven by the service's
@@ -851,12 +967,15 @@ class NearShareWindow(Adw.ApplicationWindow):
         if request.text_preview:
             body += f'\nIncludes text: "{request.text_preview}"'
 
+        # AirDrop has no PIN; an empty one is how its requests arrive.
+        via = "" if request.pin else " over AirDrop"
         dialog = Adw.AlertDialog.new(
-            f"Incoming transfer from {request.device_name}", body)
-        pin_label = Gtk.Label(
-            label=f"Verify PIN: {request.pin}",
-            css_classes=["title-2"], margin_top=12, margin_bottom=6)
-        dialog.set_extra_child(pin_label)
+            f"Incoming transfer from {request.device_name}{via}", body)
+        if request.pin:
+            pin_label = Gtk.Label(
+                label=f"Verify PIN: {request.pin}",
+                css_classes=["title-2"], margin_top=12, margin_bottom=6)
+            dialog.set_extra_child(pin_label)
         dialog.add_response("decline", "Decline")
         dialog.add_response("accept", "Accept")
         dialog.set_response_appearance(
@@ -886,7 +1005,9 @@ class NearShareWindow(Adw.ApplicationWindow):
         notification = Gio.Notification.new(
             f"{request.device_name} wants to share {count} "
             f"{'file' if count == 1 else 'files'}")
-        notification.set_body(f"Verify PIN: {request.pin}")
+        notification.set_body(
+            f"Verify PIN: {request.pin}" if request.pin
+            else "AirDrop — open NearShare to accept or decline.")
         notification.set_priority(Gio.NotificationPriority.URGENT)
         self.app.send_notification("transfer-request", notification)
 
@@ -904,13 +1025,28 @@ class NearShareWindow(Adw.ApplicationWindow):
         dialog.set_extra_child(scroller)
         dialog.add_response("close", "Close")
         dialog.add_response("copy", "Copy")
-        dialog.set_response_appearance("copy", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("copy")
+        # A lone web link (what an AirDropped link is) can be opened, but
+        # only by the person clicking: it came from an unauthenticated peer.
+        stripped = text.strip()
+        is_link = (stripped.lower().startswith(("http://", "https://"))
+                   and not any(c.isspace() for c in stripped))
+        if is_link:
+            dialog.add_response("open", "Open Link")
+            dialog.set_response_appearance("open",
+                                           Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("open")
+        else:
+            dialog.set_response_appearance("copy",
+                                           Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("copy")
         dialog.set_close_response("close")
 
         def on_response(source: Adw.AlertDialog, result: Gio.AsyncResult) -> None:
-            if source.choose_finish(result) == "copy":
+            response = source.choose_finish(result)
+            if response == "copy":
                 self._copy_to_clipboard(text)
+            elif response == "open":
+                Gtk.UriLauncher.new(stripped).launch(self, None, None)
 
         dialog.choose(self, None, on_response)
 
@@ -1024,6 +1160,10 @@ class NearShareApplication(Adw.Application):
             self._with_window(lambda w: w.update_visibility(visible)))
         self.service.on_peers_changed = lambda peers: idle(
             self._with_window(lambda w: w.update_peers(peers)))
+        self.service.airdrop.on_state_changed = lambda _state: idle(
+            self._with_window(lambda w: w.update_airdrop()))
+        self.service.airdrop.on_peers_changed = lambda peers: idle(
+            self._with_window(lambda w: w.update_airdrop_peers(peers)))
 
         def after_start(_result, exc: BaseException | None) -> None:
             if exc is not None:

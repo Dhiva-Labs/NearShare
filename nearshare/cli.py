@@ -34,6 +34,11 @@ from .core.service import control_socket_path
 
 SOCKET_TIMEOUT = 5.0
 PEER_WAIT_TIMEOUT = 20.0
+# A send's answer comes when the transfer ends: after the recipient has
+# accepted and every byte has arrived, which over AirDrop can be minutes.
+SEND_TIMEOUT = 3600.0
+# Opening the AirDrop window waits on pkexec and the radio backend.
+AIRDROP_START_TIMEOUT = 150.0
 
 NOT_RUNNING_MSG = "NearShare app is not running"
 NO_PEERS_MSG = ("No nearby devices found. On the target device, open Quick "
@@ -131,6 +136,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if resp.get("port") is not None:
         print(f"  listening   : port {resp['port']}")
     print(f"  peers seen  : {resp.get('peers', 0)}")
+    airdrop = resp.get("airdrop")
+    if isinstance(airdrop, dict):
+        print(f"  airdrop     : {_airdrop_line(airdrop)}")
     return 0
 
 
@@ -173,7 +181,11 @@ def cmd_toggle(args: argparse.Namespace) -> int:
 def _format_peers(peers: list[dict[str, Any]]) -> str:
     if not peers:
         return NO_PEERS_MSG
-    lines = [f"  {p['name']!r}  ({p['host']}:{p['port']})" for p in peers]
+    lines = []
+    for p in peers:
+        via = " [AirDrop]" if p.get("protocol") == "airdrop" else ""
+        silent = "" if p.get("named", True) else " (not answering yet)"
+        lines.append(f"  {p['name']!r}{via}{silent}  ({p['host']}:{p['port']})")
     return "Nearby devices:\n" + "\n".join(lines)
 
 
@@ -235,6 +247,76 @@ def cmd_forget(args: argparse.Namespace) -> int:
     return 1
 
 
+# ---------------------------------------------------------------- airdrop
+
+def _airdrop_line(status: dict[str, Any]) -> str:
+    state = status.get("state")
+    if state == "on":
+        remaining = status.get("remaining")
+        left = (f", {remaining // 60}m{remaining % 60:02d}s left"
+                if isinstance(remaining, int) else ", until turned off")
+        return f"visible to Apple devices{left}"
+    if state in ("starting", "stopping"):
+        return f"{state}…"
+    if status.get("error"):
+        return f"off — {status['error']}"
+    if status.get("ready") is False and status.get("explain"):
+        return f"off — {status['explain']}"
+    return "off"
+
+
+def cmd_airdrop(args: argparse.Namespace) -> int:
+    action = args.action
+    if action == "on":
+        req = {"cmd": "airdrop", "action": "on", "minutes": args.minutes}
+        timeout = AIRDROP_START_TIMEOUT
+    elif action == "peers":
+        req = {"cmd": "airdrop", "action": "discover",
+               "seconds": max(args.seconds, 5)}
+        timeout = SOCKET_TIMEOUT
+    else:
+        req = {"cmd": "airdrop",
+               "action": "probe" if action == "status" else action}
+        timeout = AIRDROP_START_TIMEOUT if action == "off" else 15.0
+    resp = _control_request(req, timeout=timeout)
+    if resp is None:
+        return _not_running()
+    if args.json and action != "peers":
+        print(json.dumps(resp))
+        return 1 if "error" in resp else 0
+    if "error" in resp:
+        print(f"AirDrop: {resp['error']}", file=sys.stderr)
+        return 1
+    status = resp.get("airdrop", {})
+    if action != "peers":
+        print(f"AirDrop is {_airdrop_line(status)}")
+        if action == "status" and status.get("backend"):
+            print(f"  radio backend : {status['backend']}")
+        return 0
+    # Peers: the app looks for Apple devices (waking them over Bluetooth)
+    # for --seconds; print them as they answer.
+    import time
+    deadline = time.monotonic() + args.seconds
+    shown: set[str] = set()
+    print(f"Looking for Apple devices for {args.seconds}s (AirDrop on "
+          "the other device must be set to Everyone)…")
+    while time.monotonic() < deadline:
+        presp = _control_request({"cmd": "peers"}) or {}
+        for p in presp.get("peers", []):
+            if p.get("protocol") != "airdrop" or not p.get("named"):
+                continue
+            if p["instance"] not in shown:
+                shown.add(p["instance"])
+                if args.json:
+                    print(json.dumps(p))
+                else:
+                    print(f"  {p['name']!r}  ({p.get('model') or 'Apple device'})")
+        time.sleep(1)
+    if not shown and not args.json:
+        print("No Apple device answered.")
+    return 0 if shown else 2
+
+
 # -------------------------------------------------------------------- gui
 
 def cmd_gui(args: argparse.Namespace) -> int:
@@ -265,16 +347,21 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     status = _control_request({"cmd": "status"})
     if status is not None:
-        return _send_via_socket(files, args.to, args.json)
+        return _send_via_socket(files, args.to, args.json, args.via)
+    if args.via == "airdrop":
+        print("AirDrop sends go through the running app: start NearShare "
+              "and turn AirDrop on first.", file=sys.stderr)
+        return 1
     return asyncio.run(_send_ephemeral(files, args.to))
 
 
 def _send_via_socket(files: list[str], to: str | None,
-                     as_json: bool) -> int:
+                     as_json: bool, via: str | None = None) -> int:
     peer_name = to
     if not peer_name:
         presp = _control_request({"cmd": "peers"})
-        peers = (presp or {}).get("peers", [])
+        peers = [p for p in (presp or {}).get("peers", [])
+                 if via is None or p.get("protocol") == via]
         if not peers:
             print(NO_PEERS_MSG, file=sys.stderr)
             return 2
@@ -285,8 +372,10 @@ def _send_via_socket(files: list[str], to: str | None,
             return 2
         peer_name = peers[0]["name"]
 
-    resp = _control_request({"cmd": "send", "peer": peer_name,
-                             "files": files})
+    req = {"cmd": "send", "peer": peer_name, "files": files}
+    if via:
+        req["protocol"] = via
+    resp = _control_request(req, timeout=SEND_TIMEOUT)
     if resp is None:
         return _not_running()
     if as_json:
@@ -295,8 +384,12 @@ def _send_via_socket(files: list[str], to: str | None,
     if "error" in resp:
         print(f"Send failed: {resp['error']}", file=sys.stderr)
         return 1
-    print(f"Sent to {resp.get('sent_to', peer_name)}. Check that device's "
-         "screen — it shows the PIN so you can confirm the transfer.")
+    if resp.get("protocol") == "airdrop":
+        print(f"Sent to {resp.get('sent_to', peer_name)} over AirDrop.")
+    else:
+        print(f"Sent to {resp.get('sent_to', peer_name)}. Check that "
+              "device's screen — it shows the PIN so you can confirm the "
+              "transfer.")
     return 0
 
 
@@ -1339,7 +1432,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", metavar="NAME",
                   help="target device name (default: the only peer "
                        "found, or an error if there are several)")
+    p.add_argument("--via", choices=("quickshare", "airdrop"),
+                   help="only consider peers reachable this way")
     p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser(
+        "airdrop", parents=[json_parent],
+        help="AirDrop with iPhones, iPads and Macs: on, off, status, peers",
+        description="AirDrop needs an AWDL radio backend (omdrop-owl for "
+                    "MediaTek/Intel Wi-Fi, omdrop-awdl for Apple Silicon "
+                    "Macs). `on` makes this machine visible to Apple "
+                    "devices set to Everyone for a number of minutes; "
+                    "`peers` looks for Apple devices to send to; `nearshare "
+                    "send --via airdrop` sends to one.")
+    p.add_argument("action", choices=("on", "off", "status", "peers"))
+    p.add_argument("minutes", nargs="?", type=int, default=10,
+                   help="for `on`: how long to stay visible, 0 for until "
+                        "`off` (default 10)")
+    p.add_argument("--seconds", type=int, default=30,
+                   help="for `peers`: how long to look (default 30)")
+    p.set_defaults(func=cmd_airdrop)
 
     p = sub.add_parser(
         "send-picker",

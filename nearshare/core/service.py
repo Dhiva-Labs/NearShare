@@ -10,6 +10,12 @@ running app:
     {"cmd": "on"} / {"cmd": "off"} / {"cmd": "toggle"}
     {"cmd": "peers"}                       -> {"peers": [...]}
     {"cmd": "send", "peer": "<instance>", "files": ["/path", ...]}
+    {"cmd": "airdrop", "action": "on", "minutes": 10}   (or "off",
+        "status", "probe", "discover" with "seconds")
+
+Peers and sends span both protocols: Quick Share peers come from mDNS on
+the LAN, AirDrop peers from the AWDL radio while its window is open
+(nearshare.airdrop.manager).
 """
 
 from __future__ import annotations
@@ -22,6 +28,9 @@ import socket
 from pathlib import Path
 from typing import Callable
 
+from ..airdrop.manager import AirDrop
+from ..airdrop.radio import RadioError
+from ..airdrop.sender import AirDropPeer, SendError
 from .ble import BleAdvertiser, BleScanner, BleUnavailable
 from .connection import (Events, InboundConnection, OutboundConnection,
                          random_endpoint_id)
@@ -102,6 +111,8 @@ class NearShareService:
         self._ble_notified_at: float = 0.0
         self.on_ble_activity: Callable[[], None] | None = None
         self.browser = Browser(on_change=self._peers_changed)
+        self.airdrop = AirDrop(self.device_name, self.download_dir,
+                               self.events)
         self.on_visibility_changed: Callable[[bool], None] | None = None
         self.on_peers_changed: Callable[[dict[str, Peer]], None] | None = None
 
@@ -122,10 +133,14 @@ class NearShareService:
         await self.browser.start()
         await self._start_ble_scan()
         await self._start_control_socket()
+        # Whether AirDrop can work here (radio backend, Wi-Fi card, AP
+        # channel) is a few subprocess calls; don't hold startup on it.
+        self._airdrop_probe = asyncio.create_task(self.airdrop.probe())
         if visible:
             await self.set_visible(True)
 
     async def stop(self) -> None:
+        await self.airdrop.shutdown()
         await self.set_visible(False)
         if self._ble_scanner.active:
             await asyncio.to_thread(self._ble_scanner.stop)
@@ -236,8 +251,17 @@ class NearShareService:
         finally:
             self._inbound_count -= 1
 
-    async def send_files(self, peer: Peer, files: list[Path]) -> None:
+    async def send_files(self, peer: Peer | AirDropPeer,
+                         files: list[Path]) -> None:
         """Send files to a discovered peer. Raises on failure."""
+        if isinstance(peer, AirDropPeer):
+            try:
+                await self.airdrop.send_files(peer, files)
+            except SendError as exc:
+                if self.events.on_error:
+                    self.events.on_error(peer.display_name, str(exc))
+                raise
+            return
         conn = OutboundConnection(peer.host, peer.port, self.events,
                                   self.device_name, files,
                                   peer_name=peer.device_name)
@@ -315,7 +339,8 @@ class NearShareService:
                     "port": self.port, "peers": len(self.browser.peers),
                     "ble": self.ble_status,
                     "ble_scan": self.ble_scan_status,
-                    "ble_activity_nearby": recent}
+                    "ble_activity_nearby": recent,
+                    "airdrop": self.airdrop.status()}
         if cmd in ("on", "off", "toggle"):
             if cmd == "toggle":
                 visible = await self.toggle()
@@ -325,22 +350,67 @@ class NearShareService:
         if cmd == "peers":
             return {"peers": [
                 {"instance": name, "name": p.device_name, "host": p.host,
-                 "port": p.port, "type": p.device_type}
-                for name, p in self.browser.peers.items()]}
+                 "port": p.port, "type": p.device_type,
+                 "protocol": "quickshare"}
+                for name, p in self.browser.peers.items()] + [
+                {"instance": key, "name": p.display_name, "host": p.address,
+                 "port": p.port, "model": p.model, "named": p.name is not None,
+                 "protocol": "airdrop"}
+                for key, p in self.airdrop.peers.items()]}
+        if cmd == "airdrop":
+            return await self._dispatch_airdrop(req)
         if cmd == "send":
             files = [Path(f) for f in req.get("files", [])]
             missing = [str(f) for f in files if not f.is_file()]
             if missing:
                 return {"error": f"no such file: {', '.join(missing)}"}
-            peer = self._match_peer(req.get("peer", ""))
+            needle = str(req.get("peer", ""))
+            protocol = req.get("protocol")
+            peer: Peer | AirDropPeer | None = None
+            if protocol != "airdrop":
+                peer = self._match_peer(needle)
+            if peer is None and protocol != "quickshare":
+                peer = self.airdrop.match_peer(needle)
             if peer is None:
-                return {"error": "peer not found; is its Quick Share screen open?"}
+                return {"error": "peer not found; is its Quick Share screen "
+                                 "open (or, for an Apple device, is AirDrop "
+                                 "on and set to Everyone)?"}
             try:
                 await self.send_files(peer, files)
-                return {"ok": True, "sent_to": peer.device_name}
+                name = (peer.display_name if isinstance(peer, AirDropPeer)
+                        else peer.device_name)
+                return {"ok": True, "sent_to": name,
+                        "protocol": ("airdrop" if isinstance(peer, AirDropPeer)
+                                     else "quickshare")}
             except Exception as exc:  # surfaced to CLI user
                 return {"error": str(exc)}
         return {"error": f"unknown command {cmd!r}"}
+
+    async def _dispatch_airdrop(self, req: dict) -> dict:
+        action = req.get("action")
+        try:
+            if action == "on":
+                minutes = req.get("minutes", 10)
+                if not isinstance(minutes, (int, float)) or not 0 <= minutes <= 24 * 60:
+                    return {"error": "minutes must be 0 (until off) to 1440"}
+                await self.airdrop.set_visible(True, minutes)
+            elif action == "off":
+                await self.airdrop.set_visible(False)
+            elif action == "probe":
+                await self.airdrop.probe()
+            elif action == "discover":
+                seconds = req.get("seconds", 60)
+                if not isinstance(seconds, (int, float)) or not 0 < seconds <= 600:
+                    return {"error": "seconds must be 1 to 600"}
+                if not self.airdrop.visible:
+                    return {"error": "AirDrop is off; turn it on first "
+                                     "(nearshare airdrop on)"}
+                await self.airdrop.discover(seconds)
+            elif action not in (None, "status"):
+                return {"error": f"unknown airdrop action {action!r}"}
+        except RadioError as exc:
+            return {"error": str(exc), "airdrop": self.airdrop.status()}
+        return {"airdrop": self.airdrop.status()}
 
     def _match_peer(self, needle: str) -> Peer | None:
         needle = needle.lower()
