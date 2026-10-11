@@ -21,6 +21,7 @@ simply reported unavailable and mDNS-only operation continues.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 
 log = logging.getLogger("nearshare.ble")
@@ -380,3 +381,10 @@ def _find_adapter(bus) -> str | None:
         if "org.bluez.LEAdvertisingManager1" in interfaces:
             return path
     return None
+
+
+if sys.platform == "win32":
+    # BlueZ is Linux-only. On Windows the same three names drive WinRT's
+    # advertisement publisher and watcher through a small helper process.
+    from .ble_windows import (BleAdvertiser, BleScanner,  # noqa: E402,F811
+                              BleUnavailable)
