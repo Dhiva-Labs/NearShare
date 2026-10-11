@@ -33,7 +33,7 @@ SERVICE_DATA = bytes([
     0xCA, 0x00,
 ])
 
-_ADV_PATH = "/dev/dhivalabs/nearshare/advertisement0"
+_ADV_PATH_BASE = "/dev/dhivalabs/nearshare/"
 
 _ADV_XML = """
 <node>
@@ -41,7 +41,10 @@ _ADV_XML = """
     <method name="Release"/>
     <property name="Type" type="s" access="read"/>
     <property name="ServiceData" type="a{sv}" access="read"/>
+    <property name="ManufacturerData" type="a{qv}" access="read"/>
     <property name="Includes" type="as" access="read"/>
+    <property name="MinInterval" type="u" access="read"/>
+    <property name="MaxInterval" type="u" access="read"/>
   </interface>
 </node>
 """
@@ -52,13 +55,29 @@ class BleUnavailable(Exception):
 
 
 class BleAdvertiser:
-    """Broadcasts the Quick Share trigger beacon while started.
+    """Broadcasts a BLE advertisement while started: by default the Quick
+    Share trigger beacon, or any service/manufacturer data given (the
+    AirDrop wake advert in nearshare.airdrop.wake uses this).
 
     Thread-safe start()/stop(); both are blocking but fast. All D-Bus
-    traffic happens on a private GLib main-loop thread.
+    traffic happens on a private GLib main-loop thread. Each instance
+    exports its own object path, so several can advertise at once.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, service_data: dict[str, bytes] | None = None,
+                 manufacturer_data: dict[int, bytes] | None = None,
+                 name: str = "advertisement0",
+                 label: str = "BLE trigger advertising",
+                 connectable: bool = False,
+                 interval_ms: int | None = None) -> None:
+        if service_data is None and manufacturer_data is None:
+            service_data = {SERVICE_UUID: SERVICE_DATA}
+        self._service_data = service_data or {}
+        self._manufacturer_data = manufacturer_data or {}
+        self._path = _ADV_PATH_BASE + name
+        self._label = label
+        self._connectable = connectable
+        self._interval_ms = interval_ms
         self._thread: threading.Thread | None = None
         self._stop_cb = None
         self._lock = threading.Lock()
@@ -85,7 +104,7 @@ class BleAdvertiser:
             if error:
                 self._thread = None
                 raise BleUnavailable(str(error[0]))
-            log.info("BLE trigger advertising started")
+            log.info("%s started", self._label)
 
     def stop(self) -> None:
         with self._lock:
@@ -96,7 +115,7 @@ class BleAdvertiser:
             self._thread.join(timeout=5)
             self._thread = None
             self._stop_cb = None
-            log.info("BLE trigger advertising stopped")
+            log.info("%s stopped", self._label)
 
     # ------------------------------------------------------------------
 
@@ -128,10 +147,23 @@ class BleAdvertiser:
 
             def get_property(_conn, _sender, _path, _iface, name):
                 if name == "Type":
-                    return GLib.Variant("s", "broadcast")
+                    return GLib.Variant(
+                        "s", "peripheral" if self._connectable else "broadcast")
+                if name in ("MinInterval", "MaxInterval"):
+                    # Left out (None) unless asked for: BlueZ rejects the
+                    # whole advertisement over an out-of-range interval,
+                    # and its own default suits the Quick Share beacon.
+                    if self._interval_ms is None:
+                        return None
+                    return GLib.Variant("u", self._interval_ms)
                 if name == "ServiceData":
                     return GLib.Variant("a{sv}", {
-                        SERVICE_UUID: GLib.Variant("ay", SERVICE_DATA)})
+                        uuid: GLib.Variant("ay", data)
+                        for uuid, data in self._service_data.items()})
+                if name == "ManufacturerData":
+                    return GLib.Variant("a{qv}", {
+                        company: GLib.Variant("ay", data)
+                        for company, data in self._manufacturer_data.items()})
                 if name == "Includes":
                     return GLib.Variant("as", [])
                 return None
@@ -143,13 +175,13 @@ class BleAdvertiser:
                     invocation.return_value(None)
 
             reg_id = bus.register_object(
-                _ADV_PATH, node.interfaces[0], method_call, get_property,
+                self._path, node.interfaces[0], method_call, get_property,
                 None)
 
             bus.call_sync(
                 "org.bluez", adapter, "org.bluez.LEAdvertisingManager1",
                 "RegisterAdvertisement",
-                GLib.Variant("(oa{sv})", (_ADV_PATH, {})),
+                GLib.Variant("(oa{sv})", (self._path, {})),
                 None, Gio.DBusCallFlags.NONE, 10_000, None)
         except Exception as exc:  # surfaced via start()
             error.append(exc)
@@ -166,7 +198,7 @@ class BleAdvertiser:
                         "org.bluez", adapter,
                         "org.bluez.LEAdvertisingManager1",
                         "UnregisterAdvertisement",
-                        GLib.Variant("(o)", (_ADV_PATH,)),
+                        GLib.Variant("(o)", (self._path,)),
                         None, Gio.DBusCallFlags.NONE, 5_000, None)
                 except Exception:
                     pass  # adapter gone, bluez restarted, etc.
