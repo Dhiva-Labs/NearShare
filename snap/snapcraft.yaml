@@ -1,6 +1,6 @@
 name: nearshare
 title: NearShare
-version: '1.0.9'
+version: '1.0.10'
 summary: Share files with nearby Android, Windows, macOS, and Linux devices
 description: |
   NearShare speaks Google's Quick Share / Nearby Share wire protocol
