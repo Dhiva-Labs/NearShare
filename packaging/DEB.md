@@ -3,6 +3,19 @@
 Target: Ubuntu 24.04 (noble), `Architecture: all` (pure Python 3 + GTK4/
 libadwaita via PyGObject — nothing to compile).
 
+## One package for every architecture
+
+The package is `Architecture: all`: nothing is compiled, and the generated
+protobuf bindings are plain Python. The same `.deb` therefore installs on
+amd64 and arm64. `.github/workflows/ci.yml` builds it on both
+`ubuntu-24.04` and `ubuntu-24.04-arm`, installs it on the machine that built
+it, runs `nearshare --help`, runs `tests/` against the installed copy and the
+distribution's own `python3-protobuf`/`python3-zeroconf`/`python3-cryptography`,
+starts the GTK app headlessly (`tools/gui-smoke.py`), and finally checks that
+the two builds contain identical file trees. The `.deb` from each run is kept
+as the `nearshare-deb-built-on-x64` / `nearshare-deb-built-on-arm64`
+workflow artifact.
+
 ## Why this layout, not a Python dist-packages install
 
 Upstream ships no `setup.py` or `pyproject.toml` — `nearshare/cli.py`'s

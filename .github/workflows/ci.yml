@@ -1,0 +1,323 @@
+name: CI (x64 + arm64)
+
+# Builds and tests NearShare on x64 and arm64 side by side:
+#
+#   test           the tests/ suite on ubuntu-24.04 and ubuntu-24.04-arm
+#   deb            the Debian package on both, installed and exercised
+#   deb-identical  proves the two Architecture: all packages hold the same files
+#   snap           the strictly confined snap on both, installed and exercised
+#
+# Nothing here publishes anything: the .deb and .snap files are workflow
+# artifacts only. Uploading to the Snap Store and the PPA stays a manual step
+# (see packaging/SNAP.md and packaging/PPA.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            machine: x86_64
+            file_arch: x86-64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            machine: aarch64
+            file_arch: ARM aarch64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assert the runner architecture
+        env:
+          EXPECT: ${{ matrix.machine }}
+        run: |
+          echo "uname -m = $(uname -m)"
+          test "$(uname -m)" = "$EXPECT"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Mirrors README.md's source install, plus grpcio-tools to build the
+      # protobuf bindings (tools/genproto.sh), which are not committed.
+      - name: Install dependencies and generate the protobuf bindings
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install zeroconf protobuf cryptography grpcio-tools
+          bash tools/genproto.sh .venv/bin/python
+
+      - name: Native extensions are built for this architecture
+        env:
+          FILE_ARCH: ${{ matrix.file_arch }}
+        run: |
+          so=$(.venv/bin/python -c 'import cryptography.hazmat.bindings._rust as m; print(m.__file__)')
+          file "$so"
+          file "$so" | grep -F "$FILE_ARCH"
+          .venv/bin/python -c 'import platform; print("python", platform.python_version(), platform.machine())'
+
+      # Each module is a standalone script ("Run: .venv/bin/python -m
+      # tests.test_x" in its docstring) that exits non-zero on failure.
+      - name: Run the test suite
+        run: |
+          for t in tests/test_*.py; do
+            m="tests.$(basename "$t" .py)"
+            echo "::group::$m"
+            .venv/bin/python -m "$m"
+            echo "::endgroup::"
+          done
+
+  deb:
+    name: deb (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            machine: x86_64
+            dpkg_arch: amd64
+            file_arch: x86-64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            machine: aarch64
+            dpkg_arch: arm64
+            file_arch: ARM aarch64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assert the runner architecture
+        env:
+          EXPECT_MACHINE: ${{ matrix.machine }}
+          EXPECT_DPKG: ${{ matrix.dpkg_arch }}
+        run: |
+          echo "uname -m = $(uname -m), dpkg = $(dpkg --print-architecture)"
+          test "$(uname -m)" = "$EXPECT_MACHINE"
+          test "$(dpkg --print-architecture)" = "$EXPECT_DPKG"
+
+      # debian/rules regenerates the protobuf bindings with the distribution's
+      # own protoc, which must be the system python3's grpc_tools.
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper dpkg-dev fakeroot python3-grpc-tools
+          test "$(command -v python3)" = /usr/bin/python3
+
+      - name: Build the .deb
+        run: |
+          dpkg-buildpackage -us -uc -b
+          mkdir -p dist
+          mv ../nearshare_*_all.deb dist/
+          ls -l dist
+
+      - name: Check the package metadata
+        run: |
+          deb=$(ls dist/nearshare_*_all.deb)
+          dpkg-deb -I "$deb"
+          test "$(dpkg-deb -f "$deb" Architecture)" = all
+          dpkg-deb -c "$deb" | grep -E ' \./usr/bin/nearshare$'
+          # pre-generated protobuf bindings must be inside the package
+          test "$(dpkg-deb -c "$deb" | grep -c '_pb2\.py$')" -eq 7
+
+      - name: Install the .deb
+        run: |
+          sudo apt-get install -y --no-install-recommends ./dist/nearshare_*_all.deb
+          dpkg -s nearshare | grep -E '^(Status|Architecture|Version):'
+
+      - name: nearshare --help
+        run: |
+          nearshare --help
+
+      - name: The distribution's native libraries are for this architecture
+        env:
+          FILE_ARCH: ${{ matrix.file_arch }}
+        run: |
+          cd "$RUNNER_TEMP"
+          export PYTHONPATH=/usr/share/nearshare
+          so=$(python3 -c 'import cryptography.hazmat.bindings._rust as m; print(m.__file__)')
+          file "$so"
+          file "$so" | grep -F "$FILE_ARCH"
+          python3 - <<'PY'
+          import platform
+          import gi
+          gi.require_version("Gtk", "4.0")
+          gi.require_version("Adw", "1")
+          from gi.repository import Adw, Gtk
+          import nearshare
+          from nearshare.proto import wire_format_pb2  # noqa: F401
+          print("machine :", platform.machine())
+          print("package :", nearshare.__file__)
+          print("GTK     : %d.%d.%d" % (Gtk.get_major_version(),
+                Gtk.get_minor_version(), Gtk.get_micro_version()))
+          print("libadw  : %d.%d.%d" % (Adw.get_major_version(),
+                Adw.get_minor_version(), Adw.get_micro_version()))
+          assert nearshare.__file__.startswith("/usr/share/nearshare/")
+          PY
+
+      # The installed package against the distribution's own python3-protobuf,
+      # python3-zeroconf and python3-cryptography, not the PyPI wheels the
+      # "tests" job uses. tests/ is copied out so `nearshare` resolves to the
+      # installed copy rather than the checkout. test_cli is left to the
+      # "tests" job: it checks `nearshare install`'s source-checkout layout
+      # (a ~/.local/bin symlink to bin/nearshare), which a package install
+      # deliberately does not have.
+      - name: Run the protocol tests against the installed package
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkgtests"
+          cp -r tests "$RUNNER_TEMP/pkgtests/tests"
+          cd "$RUNNER_TEMP/pkgtests"
+          export PYTHONPATH=/usr/share/nearshare
+          for m in test_loopback test_payload_routing test_security test_single_instance; do
+            echo "::group::tests.$m"
+            python3 -m "tests.$m"
+            echo "::endgroup::"
+          done
+
+      - name: Start the GTK app headlessly
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb dbus-bin dbus-daemon
+          cp tools/gui-smoke.py "$RUNNER_TEMP/gui-smoke.py"
+          cd "$RUNNER_TEMP"
+          export PYTHONPATH=/usr/share/nearshare GSK_RENDERER=cairo GDK_BACKEND=x11
+          XDG_RUNTIME_DIR=$(mktemp -d)
+          export XDG_RUNTIME_DIR
+          xvfb-run -a -s '-screen 0 1280x1024x24 -ac' \
+            dbus-run-session -- python3 gui-smoke.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nearshare-deb-built-on-${{ matrix.arch }}
+          path: dist/nearshare_*_all.deb
+          if-no-files-found: error
+
+  deb-identical:
+    name: deb is architecture-independent
+    needs: deb
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nearshare-deb-built-on-*
+          path: debs
+
+      - name: Compare the package built on x64 with the one built on arm64
+        run: |
+          set -e
+          find debs -name '*.deb' -print
+          for a in x64 arm64; do
+            deb=$(ls debs/nearshare-deb-built-on-$a/nearshare_*_all.deb)
+            test "$(dpkg-deb -f "$deb" Architecture)" = all
+            mkdir -p "unpacked/$a"
+            dpkg-deb -x "$deb" "unpacked/$a"
+          done
+          diff -r unpacked/x64 unpacked/arm64
+          echo "identical file trees: $(find unpacked/x64 -type f | wc -l) files"
+
+  snap:
+    name: snap (${{ matrix.snap_arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            machine: x86_64
+            snap_arch: amd64
+            file_arch: x86-64
+          - os: ubuntu-24.04-arm
+            machine: aarch64
+            snap_arch: arm64
+            file_arch: ARM aarch64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assert the runner architecture
+        env:
+          EXPECT: ${{ matrix.machine }}
+        run: |
+          echo "uname -m = $(uname -m)"
+          test "$(uname -m)" = "$EXPECT"
+
+      - uses: snapcore/action-build@v1
+        id: build
+
+      - name: Inspect the built snap
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+          SNAP_ARCH: ${{ matrix.snap_arch }}
+          FILE_ARCH: ${{ matrix.file_arch }}
+        run: |
+          echo "built: $SNAP_FILE"
+          case "$SNAP_FILE" in
+            *_"$SNAP_ARCH".snap) ;;
+            *) echo "unexpected snap file name: $SNAP_FILE" >&2; exit 1 ;;
+          esac
+          ls -l "$SNAP_FILE"
+          unsquashfs -no-progress -d "$RUNNER_TEMP/squashfs" "$SNAP_FILE"
+          cat "$RUNNER_TEMP/squashfs/meta/snap.yaml"
+          grep -A1 '^architectures:' "$RUNNER_TEMP/squashfs/meta/snap.yaml" \
+            | grep -F -- "- $SNAP_ARCH"
+          # Every ELF the snap ships (the staged nmcli and its libraries, the
+          # compiled Python wheels) must be for the snap's architecture.
+          find "$RUNNER_TEMP/squashfs" -type f -exec file {} + \
+            | grep -E ': +ELF ' > "$RUNNER_TEMP/elf.txt"
+          echo "ELF files in the snap: $(wc -l < "$RUNNER_TEMP/elf.txt")"
+          grep -F 'usr/bin/nmcli' "$RUNNER_TEMP/elf.txt"
+          grep -F '_rust.abi3.so' "$RUNNER_TEMP/elf.txt"
+          awk -v want="$FILE_ARCH" '!index($0, want) { print; n++ } END { exit (n > 0) }' \
+            "$RUNNER_TEMP/elf.txt"
+
+      - name: Install the snap
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+        run: |
+          sudo snap install --dangerous "$SNAP_FILE"
+          snap list nearshare
+          snap connections nearshare
+
+      - name: nearshare --help
+        run: |
+          snap run nearshare --help
+
+      # Runs the same tools/gui-smoke.py as the deb job, but inside the snap's
+      # confinement and against the gnome content snap's GTK4 and libadwaita.
+      # snapd places every confined process in its own cgroup through the
+      # user's systemd, so give the runner a real user session (and session
+      # bus) instead of a throwaway dbus-run-session one.
+      - name: Start the GTK app headlessly inside the snap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          mkdir -p "$HOME/gui-smoke"
+          cp tools/gui-smoke.py "$HOME/gui-smoke/gui-smoke.py"
+          xvfb-run -a -s '-screen 0 1280x1024x24 -ac' \
+            snap run --shell nearshare.gui -c \
+            'cd "$SNAP/app" && PYTHONPATH="$SNAP/app${PYTHONPATH:+:$PYTHONPATH}" GSK_RENDERER=cairo GDK_BACKEND=x11 exec "$SNAP/bin/python3" "$HOME/gui-smoke/gui-smoke.py"'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nearshare-snap-${{ matrix.snap_arch }}
+          path: ${{ steps.build.outputs.snap }}
+          if-no-files-found: error

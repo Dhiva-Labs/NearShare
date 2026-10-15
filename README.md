@@ -1,5 +1,8 @@
 # NearShare for Linux
 
+[![CI (x64 + arm64)](https://github.com/Dhiva-Labs/NearShare/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/NearShare/actions/workflows/ci.yml)
+![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
+
 Quick Share (formerly Nearby Share) for the Ubuntu/GNOME desktop. NearShare
 speaks Google's wire protocol directly, so it interoperates with:
 
@@ -220,7 +223,43 @@ sequenceDiagram
 
 ## Install
 
-Target platform: Ubuntu 24.04 / GNOME.
+Target platform: Ubuntu 24.04 / GNOME, on x86-64 (amd64) and ARM64
+(aarch64) machines alike. The application is pure Python, so the code is
+the same on both; only the snap's compiled dependencies differ per
+architecture.
+
+### Packages
+
+**Snap**, built for `amd64` and `arm64`:
+
+```bash
+sudo snap install nearshare
+sudo snap connect nearshare:bluez            # optional: Bluetooth LE beacon
+sudo snap connect nearshare:network-manager  # optional: Direct mode
+```
+
+**Debian package** from the Dhiva Labs PPA. It is `Architecture: all`, so
+one package serves both `amd64` and `arm64`, and it also installs the
+Files (Nautilus) right-click "Send with NearShare" item:
+
+```bash
+sudo add-apt-repository ppa:dhiva-labs/apps
+sudo apt install nearshare
+```
+
+On an arm64 machine this only works once the PPA publishes for arm64
+(its owner enables ARM in the PPA's *Change details* page, under
+*Processors*); until then `apt` reports that the repository does not
+support the `arm64` architecture.
+
+Every push and pull request is built and tested on both architectures
+(`ubuntu-24.04` and `ubuntu-24.04-arm`) by the
+[CI workflow](.github/workflows/ci.yml), which uploads the `.deb`
+(`nearshare-deb-built-on-x64`, `nearshare-deb-built-on-arm64`) and the
+snaps (`nearshare-snap-amd64`, `nearshare-snap-arm64`) as run artifacts.
+Those artifacts are unsigned test builds, not releases.
+
+### From source
 
 ```bash
 # System package for the GTK4/libadwaita GUI bindings (not available via pip).

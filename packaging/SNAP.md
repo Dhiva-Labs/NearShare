@@ -27,9 +27,41 @@ minutes: it fetches `network-manager` and its dependencies as a
 stage-package, plus the build-only `grpcio-tools` needed to run
 `tools/genproto.sh`.
 
-Output: `nearshare_1.0.0_amd64.snap` (and `_arm64.snap` if you build for
-that platform too -- see the `platforms:` key in `snap/snapcraft.yaml`;
-only `amd64` was actually built and tested for this round).
+Output: `nearshare_<version>_amd64.snap` on an amd64 machine and
+`nearshare_<version>_arm64.snap` on an arm64 one -- `platforms:` in
+`snap/snapcraft.yaml` lists both, and a native `snapcraft` run builds the one
+that matches the host. See [Building for arm64](#building-for-arm64).
+
+## Building for arm64
+
+Nothing in the snap is architecture-specific: the python plugin pulls
+manylinux `aarch64` wheels for `zeroconf`, `protobuf`, `cryptography` and
+the build-only `grpcio-tools`, `network-manager` is staged from the Ubuntu
+`arm64` archive, and no path in `snapcraft.yaml` names a multiarch triplet.
+
+The arm64 snap is built natively -- on an arm64 machine, or in CI on the
+`ubuntu-24.04-arm` runner. `.github/workflows/ci.yml` does that for every
+push and pull request, next to the amd64 build on `ubuntu-24.04`, and for
+each of them:
+
+- checks that `meta/snap.yaml` declares the right architecture and that
+  every ELF file in the snap (the staged `nmcli` and its libraries, the
+  compiled wheels) is built for it;
+- installs the snap and runs `nearshare --help`;
+- starts the GTK application under `xvfb` inside the snap's confinement and
+  checks that its window opens and its receive service listens
+  (`tools/gui-smoke.py`);
+- uploads the `.snap` as the `nearshare-snap-amd64` / `nearshare-snap-arm64`
+  workflow artifact.
+
+CI never talks to the Snap Store. To put the arm64 build on the Store, take
+the artifact from a green run on the commit you are releasing (or build it
+on an arm64 machine), check that its version matches the amd64 revision,
+then upload it to the same channel:
+
+```bash
+snapcraft upload --release=stable ./nearshare_<version>_arm64.snap
+```
 
 ## Local install
 
