@@ -57,6 +57,25 @@ means shipping pre-generated bindings instead is a deliberate design
 change, not a quick patch — flag it rather than silently committing
 generated `_pb2.py` files against the gitignore's intent).
 
+## Making the PPA available on arm64
+
+`nearshare` is `Architecture: all`, so the amd64 build is the only one
+Launchpad needs, but an arm64 machine can only install it if the PPA
+publishes for arm64 at all. That is a setting on the PPA, not something in
+this repository: open <https://launchpad.net/~dhiva-labs/+archive/ubuntu/apps/+edit>
+and tick the ARM ARMv8 (arm64) processor under *Processors*. Until it is
+enabled, `apt update` on an arm64 machine skips the PPA with "repository
+doesn't support architecture 'arm64'".
+
+Launchpad publishes an `Architecture: all` binary into the architectures
+that are enabled when it is published, so a version uploaded before arm64
+was enabled may need to be re-published for arm64 (upload a new version, or
+copy the existing publication onto itself). Check with
+`apt-cache policy nearshare` on an arm64 machine.
+
+CI proves the package itself works on arm64 (see `packaging/DEB.md`); it does
+not exercise Launchpad.
+
 ## Rehearse the source build before every upload
 
 ```bash
