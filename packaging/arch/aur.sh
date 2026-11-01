@@ -46,6 +46,10 @@ docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$work:/build" 
   pacman -Syu --noconfirm --needed -q base-devel namcap xorg-server-xvfb xorg-xauth mesa dbus
   useradd -m builder
   chown -R builder /build
+  # check() starts the app service, which binds its control socket in
+  # $XDG_RUNTIME_DIR (/run/user/<uid> by default): a login session has one,
+  # this container does not.
+  install -d -m 700 -o builder /run/user/"$(id -u builder)"
   cd /build
   su builder -c "makepkg --printsrcinfo > .SRCINFO"
   mapfile -t deps < <(sed -nE "s/^\t(make|check)?depends = //p" .SRCINFO)
