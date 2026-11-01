@@ -3,6 +3,15 @@
 Versions up to 1.0.8 are described in `debian/changelog`. The snap and the application have
 shared one version number since then; the Debian package keeps its own `~noble1` revision.
 
+## Unreleased
+
+### Added
+- Packages for other distributions, built from the `.deb` and tested in CI on each: a noarch
+  `.rpm` (Fedora, RHEL, openSUSE), an Arch Linux package, an AUR PKGBUILD (built from source
+  against Arch's protobuf) and a Flatpak bundle (`dev.dhivalabs.nearshare`, GNOME 51 runtime) for
+  x86-64 and arm64. The `.rpm`, Arch package and Flatpak carry a pure-Python protobuf runtime
+  with bindings generated for it. A published GitHub release gets them attached.
+
 ## 1.0.10 - 2026-10-16
 
 ### Added

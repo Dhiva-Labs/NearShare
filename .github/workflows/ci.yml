@@ -6,16 +6,24 @@ name: CI (x64 + arm64)
 #   deb            the Debian package on both, installed and exercised
 #   deb-identical  proves the two Architecture: all packages hold the same files
 #   snap           the strictly confined snap on both, installed and exercised
+#   packages       .rpm and Arch package from the .deb's tree (noarch / any)
+#   distros        installs them on Fedora, openSUSE and Arch, x64 + arm64
+#   aur            the AUR PKGBUILD, built and run on Arch
+#   flatpak        the Flatpak bundle, x64 + arm64
+#   flatpak-test   installs the bundle with the Flathub runtime and runs it
+#   release        attaches the new packages to a published GitHub release
 #
-# Nothing here publishes anything: the .deb and .snap files are workflow
+# Nothing else publishes anything: the .deb and .snap files are workflow
 # artifacts only. Uploading to the Snap Store and the PPA stays a manual step
-# (see packaging/SNAP.md and packaging/PPA.md).
+# (see packaging/SNAP.md and packaging/PPA.md), as do the AUR and Flathub.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -321,3 +329,279 @@ jobs:
           name: nearshare-snap-${{ matrix.snap_arch }}
           path: ${{ steps.build.outputs.snap }}
           if-no-files-found: error
+
+  # The .rpm (Fedora, RHEL, openSUSE) and the Arch package. Both are made
+  # from the x64-built .deb's tree (deb-identical proves the two builds hold
+  # the same files) with protobuf bindings and a pure-Python protobuf runtime
+  # of their own: no protobuf other than Ubuntu's loads the .deb's bindings
+  # (packaging/linux-distros/build-tree.sh). Architecture-independent, like
+  # the .deb: built once, installed on x86_64 and aarch64 by "distros".
+  packages:
+    name: rpm and Arch packages
+    needs: deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NFPM_VERSION: '2.48.0'
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: nearshare-deb-built-on-x64
+          path: deb
+
+      # The application's version is the snap's (see CHANGELOG.md); the
+      # .deb keeps its own ~noble revision in debian/changelog.
+      - name: Package version
+        id: v
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(sed -n "s/^version: '\(.*\)'$/\1/p" snap/snapcraft.yaml)"
+          test -n "$version"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::release $TAG does not match version $version in snap/snapcraft.yaml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install nfpm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          tarball="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          gh release download "v$NFPM_VERSION" -R goreleaser/nfpm -p "$tarball" -p checksums.txt
+          grep " $tarball\$" checksums.txt | sha256sum -c -
+          tar -xzf "$tarball" nfpm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Build the .rpm and the Arch package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          packaging/linux-distros/build-tree.sh deb/nearshare_*_all.deb "$RUNNER_TEMP/root"
+          packaging/linux-distros/pack.sh "$RUNNER_TEMP/root" amd64 dist
+          # The Flatpak job builds from the same tree; tar keeps modes and symlinks.
+          tar -C "$RUNNER_TEMP/root" -cJf "$RUNNER_TEMP/tree.tar.xz" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: distros
+          path: |
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tree
+          path: ${{ runner.temp }}/tree.tar.xz
+          if-no-files-found: error
+          retention-days: 3
+
+  # Installs the packages on Fedora, openSUSE Tumbleweed and Arch Linux and
+  # runs packaging/linux-distros/smoke.sh there: the deb job's checks
+  # (imports, protocol tests, gui-smoke.py under Xvfb) against each
+  # distribution's own Python, PyGObject, GTK4, libadwaita, zeroconf and
+  # cryptography. arm64 has no official Arch image, so the Arch package gets
+  # a static check on that leg.
+  distros:
+    name: Other distros ${{ matrix.arch }}
+    needs: packages
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, deb_arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, deb_arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: distros
+          path: dist
+      - name: Install and run on Fedora, openSUSE and Arch
+        run: packaging/linux-distros/verify.sh dist ${{ matrix.deb_arch }}
+
+  # AUR recipe: PKGBUILD + .SRCINFO, built from the release's source archive
+  # with Arch's own grpcio-tools and protobuf, and proven with makepkg
+  # (including the protocol tests in check()) on archlinux:latest. GitHub's
+  # archive of the tag is used once the tag exists; before that a git
+  # archive of this commit stands in (its checksum differs from GitHub's, so
+  # that PKGBUILD is a build check only).
+  aur:
+    name: AUR PKGBUILD
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.packages.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Source archive
+        run: |
+          tag="v$VERSION"
+          if [ "$GITHUB_EVENT_NAME" = release ] || git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            curl -fsSL -o "$RUNNER_TEMP/source.tar.gz" "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$tag.tar.gz"
+          else
+            echo "::notice::tag $tag does not exist yet; checking the PKGBUILD against git archive HEAD"
+            git archive --format=tar.gz --prefix="NearShare-$VERSION/" -o "$RUNNER_TEMP/source.tar.gz" HEAD
+          fi
+          tar -tzf "$RUNNER_TEMP/source.tar.gz" "NearShare-$VERSION/tools/genproto.sh"
+      - name: Render and check the PKGBUILD
+        run: packaging/arch/aur.sh "$RUNNER_TEMP/source.tar.gz" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aur
+          path: dist/*-aur.tar.gz
+          if-no-files-found: error
+
+  # The Flatpak bundle, from the same tree, inside the Flathub builder image
+  # (packaging/flatpak/).
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: packages
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, fp_arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: arm64, fp_arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tree
+          path: tree-artifact
+
+      - name: Unpack the installed tree
+        run: |
+          mkdir -p packaging/flatpak/tree
+          tar -xJf tree-artifact/tree.tar.xz -C packaging/flatpak/tree
+          rm -rf tree-artifact
+
+      # The action's own artifact upload is off: the bundle is uploaded for
+      # the release only by flatpak-test, after it has been installed and run.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/dev.dhivalabs.nearshare.yml
+          bundle: nearshare-${{ needs.packages.outputs.version }}-${{ matrix.fp_arch }}.flatpak
+          arch: ${{ matrix.fp_arch }}
+          cache: false
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-build-${{ matrix.arch }}
+          path: nearshare-${{ needs.packages.outputs.version }}-${{ matrix.fp_arch }}.flatpak
+          if-no-files-found: error
+          retention-days: 3
+
+  # Installs the bundle on the runner the way a user would (GNOME runtime
+  # from Flathub) and runs packaging/flatpak/test-bundle.sh: ldd inside the
+  # sandbox, the protocol tests and gui-smoke.py.
+  flatpak-test:
+    name: Flatpak ${{ matrix.arch }} install and run
+    needs: flatpak
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: flatpak-build-${{ matrix.arch }}
+          path: bundle
+
+      - name: Install flatpak and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak xvfb xauth dbus-bin dbus-daemon
+
+      - name: Install the bundle and run it
+        run: sudo packaging/flatpak/test-bundle.sh bundle/*.flatpak
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: bundle/*.flatpak
+          if-no-files-found: error
+
+  # Releases are published by hand. This attaches the new packages to a
+  # newly published release, skipping any name the release already has. On
+  # other events it only checks that every expected file was built.
+  release:
+    name: Release assets
+    needs: [test, deb, snap, packages, distros, aur, flatpak-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+      VERSION: ${{ needs.packages.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distros
+          path: assets
+      - uses: actions/download-artifact@v8
+        with:
+          name: aur
+          path: assets
+      # By name: the pattern flatpak-* would also match the untested
+      # flatpak-build-* bundles.
+      - uses: actions/download-artifact@v8
+        with:
+          name: flatpak-x64
+          path: assets
+      - uses: actions/download-artifact@v8
+        with:
+          name: flatpak-arm64
+          path: assets
+      - name: Check the release assets
+        run: |
+          ls -l assets
+          for f in "nearshare-$VERSION-1.noarch.rpm" "nearshare-$VERSION-1-any.pkg.tar.zst" \
+                   "nearshare-$VERSION-aur.tar.gz" "nearshare-$VERSION-x86_64.flatpak" \
+                   "nearshare-$VERSION-aarch64.flatpak"; do
+            test -f "assets/$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          test "$(ls assets | wc -l)" -eq 5
+      - name: Upload to release ${{ github.event.release.tag_name }}
+        if: github.event_name == 'release'
+        run: |
+          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
+          for f in assets/*; do
+            name="$(basename "$f")"
+            if printf '%s\n' "$existing" | grep -qxF -- "$name"; then
+              echo "skip $name (already on the release)"
+            else
+              echo "upload $name"
+              gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY"
+            fi
+          done

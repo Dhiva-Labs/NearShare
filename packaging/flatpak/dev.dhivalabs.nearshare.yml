@@ -1,0 +1,102 @@
+# Flatpak manifest for NearShare.
+#
+# Like the .rpm and the Arch package, this repackages the installed tree
+# that CI builds from the .deb (packaging/linux-distros/build-tree.sh:
+# the .deb's files, protobuf bindings regenerated for the bundled
+# pure-Python protobuf), unpacked into packaging/flatpak/tree/ by the
+# workflow. The GNOME runtime provides Python, PyGObject, GTK4 and
+# libadwaita; zeroconf and cryptography are installed from pinned PyPI
+# wheels, offline, the way flatpak-pip-generator lays it out. A Flathub
+# submission needs `tree` swapped for an archive source; see README.md in
+# this directory.
+id: dev.dhivalabs.nearshare
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+command: nearshare
+finish-args:
+  # GTK needs a display socket; fallback-x11 covers X11-only desktops.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # mDNS discovery (python-zeroconf's own multicast sockets on port 5353;
+  # Avahi is not used) and the transfer connections in both directions.
+  - --share=network
+  # The BLE trigger advertisement goes through BlueZ on the system bus
+  # (org.bluez.LEAdvertisingManager1); no raw Bluetooth sockets are used.
+  - --system-talk-name=org.bluez
+  # Received files are saved to ~/Downloads.
+  - --filesystem=xdg-download
+modules:
+  - name: python3-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} --no-build-isolation zeroconf cryptography
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/20/0b/fb1b4739a7de2d3b3e2a4fc98e28a7188fd90e0f129d61ebab173669f7df/zeroconf-0.153.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+        sha256: eee35a9893de37cddd1a47cec0c55decb574fd1987f163581d33f0cac88bcbe5
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/52/9f/a2bdcf028647c267c1e54839c5a5bd3c52cc43ba95467a59ac94f3b90cc4/zeroconf-0.153.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 93df8c8a1db4a60b8ada670c0a180a91fdc5568a8f341f451a187cb9bd2ff27f
+        only-arches: [aarch64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/7c/08/af89843a77ccc109d1cf0beb53e7757af6a5fbdb5bb2c707d014218e679f/zeroconf-0.153.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+        sha256: 32608c3ffd977f6c31b1f39201fdeda2d18c939fded953a1e75c7ceffa43634c
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/47/17/dc7a83f91b548c617ac5b04c2ae227ee470d8debed6b92b4992bd3de09a4/zeroconf-0.153.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+        sha256: 4e54e2e8b61dc991da6623ec66876aeb328beadcc798eefce6ec330ac628176f
+        only-arches: [aarch64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/9c/1f/19ebc343cc71a7ffa78f17018535adc5cbdd87afb31d7c34874680148b32/ifaddr-0.2.0-py3-none-any.whl
+        sha256: 085e0305cfe6f16ab12d72e2024030f5d52674afad6911bb1eee207177b8a748
+      - type: file
+        url: https://files.pythonhosted.org/packages/95/95/86342356ff5953b3fb06f7ef7c5bee212d45e770abc7218d451b9148313c/cffi-2.1.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+        sha256: a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/37/6f/3b5ce4c3b2192d250f04908f2bfd91ef34552ec8f7716a5d4abdb8d67bb2/cffi-2.1.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
+        sha256: f16c709686a78c727bbbf059f92b0bf41c6fc60deec706d2dc19f529175a6125
+        only-arches: [aarch64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/e9/02/4e7d553a7ac4b4238b38b3c1b80d486e9d4436f8d2acbf87a0997fe3f402/cffi-2.1.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+        sha256: b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/67/b8/b42132ca113dc567d37684437b46ca1dafc885902b02a110a02d5b511857/cffi-2.1.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
+        sha256: 58acb8ab8e295e6c5ea12f888cbb13cf21511ef2a3303a23f4325c29d17fe5c1
+        only-arches: [aarch64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/b6/ae/315bbeee126a769cbde43cf4908acb4b40408d8bf8bbf334dd7368d8dadf/pycparser-3.12-py3-none-any.whl
+        sha256: a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+      - type: file
+        url: https://files.pythonhosted.org/packages/d3/69/2c833a049475e0a3444e94c7d0aca0aa51d166374a449b09e92ac98138de/cryptography-50.0.2-cp311-abi3-manylinux_2_34_x86_64.whl
+        sha256: 9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079
+        only-arches: [x86_64]
+      - type: file
+        url: https://files.pythonhosted.org/packages/71/37/6202e488cc1eb625ea110c292c6bda92823176e023f427d8d5660ce8d632/cryptography-50.0.2-cp311-abi3-manylinux_2_34_aarch64.whl
+        sha256: 87e9ce85beb6b328ba370cc6e6aea483c92617b4c95b1d33a49297eb662bfb04
+        only-arches: [aarch64]
+
+  - name: nearshare
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: tree
+        dest: tree
+      - type: file
+        path: nearshare.sh
+      - type: file
+        path: dev.dhivalabs.nearshare.metainfo.xml
+    build-commands:
+      - cp -a tree/usr/share/nearshare /app/share/nearshare
+      - install -Dm755 nearshare.sh /app/bin/nearshare
+      # Only the main entry: the send and toggle entries (and the Nautilus
+      # extension) drive the app from outside, which a sandbox does not offer.
+      - install -Dm644 tree/usr/share/applications/dev.dhivalabs.nearshare.desktop /app/share/applications/dev.dhivalabs.nearshare.desktop
+      - install -Dm644 tree/usr/share/icons/hicolor/scalable/apps/dev.dhivalabs.nearshare.svg /app/share/icons/hicolor/scalable/apps/dev.dhivalabs.nearshare.svg
+      - install -Dm644 dev.dhivalabs.nearshare.metainfo.xml /app/share/metainfo/dev.dhivalabs.nearshare.metainfo.xml
