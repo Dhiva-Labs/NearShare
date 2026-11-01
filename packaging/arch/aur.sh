@@ -37,9 +37,12 @@ cp "$src" "$work/$NAME-$VERSION.tar.gz"
 if grep -n '@[A-Z0-9_]*@' "$work/PKGBUILD"; then echo "unfilled placeholder" >&2; exit 1; fi
 cat "$work/PKGBUILD"
 
-docker run --rm -v "$work:/build" -v "$here/../linux-distros:/linux-distros:ro" \
+docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$work:/build" -v "$here/../linux-distros:/linux-distros:ro" \
   -v "$repo:/src:ro" -e SMOKE_CMD="$SMOKE_CMD" -e EXPECT_PROTOBUF=/usr/lib/python3 \
   archlinux:latest bash -euo pipefail -c '
+  # makepkg runs as "builder", so /build is handed to it; give the files back
+  # to the runner user afterwards, or this script cannot read or delete them.
+  trap '"'"'chown -R "$HOST_UID:$HOST_GID" /build'"'"' EXIT
   pacman -Syu --noconfirm --needed -q base-devel namcap xorg-server-xvfb xorg-xauth mesa dbus
   useradd -m builder
   chown -R builder /build
