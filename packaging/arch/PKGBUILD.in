@@ -1,0 +1,47 @@
+# Maintainer: Dhiva Labs <dhivakar1010@gmail.com>
+#
+# AUR package, built from the release's source archive. Like debian/rules
+# does with Ubuntu's protoc, it generates the protobuf bindings with Arch's
+# own grpcio-tools, so they match Arch's python-protobuf (the release .deb's
+# bindings are made for Ubuntu's and do not load here). The layout is the
+# .deb's: the app in /usr/share/nearshare, run by /usr/bin/nearshare.
+# packaging/arch/aur.sh renders this file for each release (version and
+# checksum) and checks it with makepkg; the rendered PKGBUILD and .SRCINFO
+# are what gets pushed to the AUR.
+pkgname=@NAME@
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='@SUMMARY@'
+arch=('any')
+url='@HOMEPAGE@'
+license=('@LICENSE@')
+depends=(@ARCH_DEPENDS@ 'python-protobuf')
+makedepends=('python-grpcio-tools')
+optdepends=(@ARCH_OPTDEPENDS@)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+
+build() {
+  cd "NearShare-$pkgver"
+  bash tools/genproto.sh python3
+}
+
+check() {
+  cd "NearShare-$pkgver"
+  for t in test_loopback test_payload_routing test_security test_single_instance; do
+    python -m "tests.$t"
+  done
+}
+
+package() {
+  cd "NearShare-$pkgver"
+  install -d "$pkgdir/usr/share/nearshare"
+  cp -a nearshare "$pkgdir/usr/share/nearshare/"
+  find "$pkgdir/usr/share/nearshare" -name __pycache__ -prune -exec rm -rf {} +
+  install -Dm755 debian/nearshare.wrapper "$pkgdir/usr/bin/nearshare"
+  install -Dm644 -t "$pkgdir/usr/share/applications" data/*.desktop
+  install -Dm644 -t "$pkgdir/usr/share/icons/hicolor/scalable/apps" data/icons/dev.dhivalabs.nearshare.svg
+  install -Dm644 -t "$pkgdir/usr/share/nautilus-python/extensions" debian/extra/nearshare_menu.py
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md docs/SHORTCUT.md
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -2,6 +2,7 @@
 
 [![CI (x64 + arm64)](https://github.com/Dhiva-Labs/NearShare/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/NearShare/actions/workflows/ci.yml)
 ![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
+![Linux: deb | rpm | Arch | Flatpak | Snap](https://img.shields.io/badge/Linux-deb%20%7C%20rpm%20%7C%20Arch%20%7C%20Flatpak%20%7C%20Snap-informational?logo=linux&logoColor=white)
 
 Quick Share (formerly Nearby Share) for the Ubuntu/GNOME desktop. NearShare
 speaks Google's wire protocol directly, so it interoperates with:
@@ -258,6 +259,37 @@ Every push and pull request is built and tested on both architectures
 (`nearshare-deb-built-on-x64`, `nearshare-deb-built-on-arm64`) and the
 snaps (`nearshare-snap-amd64`, `nearshare-snap-arm64`) as run artifacts.
 Those artifacts are unsigned test builds, not releases.
+
+**Fedora, RHEL, openSUSE, Arch, and Flatpak.** CI also builds these from the
+`.deb` and tests each on its distribution (on Fedora, openSUSE Tumbleweed
+and Arch Linux; the Flatpak on Ubuntu with the Flathub runtime): imports,
+the protocol tests and the GTK app started headlessly. Once a GitHub
+release is published they are attached to it:
+
+| Distribution | File | Install |
+|---|---|---|
+| Fedora, RHEL/Rocky/Alma | `nearshare-<version>-1.noarch.rpm` | `sudo dnf install ./nearshare-<version>-1.noarch.rpm` |
+| openSUSE Tumbleweed | the same `.rpm` | `sudo zypper install --allow-unsigned-rpm ./nearshare-<version>-1.noarch.rpm` |
+| Arch, Manjaro, EndeavourOS | `nearshare-<version>-1-any.pkg.tar.zst` | `sudo pacman -U ./nearshare-<version>-1-any.pkg.tar.zst` |
+| AUR | `nearshare-<version>-aur.tar.gz` (PKGBUILD + .SRCINFO) | `nearshare` in the AUR once published |
+| any distribution with Flatpak | `nearshare-<version>-x86_64.flatpak` / `-aarch64.flatpak` | `flatpak install --user ./nearshare-<version>-x86_64.flatpak` (the GNOME runtime comes from Flathub) |
+
+The `.rpm` and the Arch package are architecture-independent and use the
+distribution's Python 3.12+, PyGObject, GTK4, libadwaita, zeroconf and
+cryptography, like the `.deb`; NetworkManager, BlueZ and nautilus-python
+are optional (rpm Recommends, Arch optdepends). Unlike the `.deb`, they
+carry their own pure-Python protobuf runtime and bindings generated for it
+in `/usr/share/nearshare`: Fedora's protobuf is too old for the `.deb`'s
+bindings and openSUSE's and Arch's are too new. The AUR PKGBUILD instead
+builds from source against Arch's own protobuf. The `.rpm` is unsigned.
+
+The Flatpak (`dev.dhivalabs.nearshare`) covers the GTK app: discovery,
+sending through the file chooser, receiving into `~/Downloads`, and the BLE
+trigger through BlueZ. It has no Direct mode (the sandbox cannot run the
+host's `nmcli`) and no Nautilus menu item; see
+[packaging/flatpak/README.md](packaging/flatpak/README.md). There is no
+AppImage: it would have to carry Python, PyGObject, GTK4, libadwaita and
+the whole GLib stack, which the Flatpak's GNOME runtime already provides.
 
 ### From source
 

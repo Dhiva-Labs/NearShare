@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.dhivalabs.nearshare</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>NearShare</name>
+  <summary>Quick Share (Nearby Share) for the GNOME desktop</summary>
+  <description>
+    <p>NearShare implements the Quick Share (formerly Nearby Share) wire protocol, so it exchanges files with Android and Windows Quick Share, macOS NearDrop and other NearShare instances on the same network, without cables, a cloud account or a companion app.</p>
+    <p>Every transfer is end-to-end encrypted and confirmed with a 4-digit PIN shown on both screens.</p>
+  </description>
+  <launchable type="desktop-id">dev.dhivalabs.nearshare.desktop</launchable>
+  <url type="homepage">https://github.com/Dhiva-Labs/NearShare</url>
+  <url type="bugtracker">https://github.com/Dhiva-Labs/NearShare/issues</url>
+  <developer id="com.dhivalabs">
+    <name>Dhiva Labs</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.10" date="2026-10-16"/>
+  </releases>
+</component>

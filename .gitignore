@@ -24,3 +24,6 @@ debian/debhelper-build-stamp
 parts/
 prime/
 stage/
+
+# The Flatpak's installed tree, unpacked by CI
+packaging/flatpak/tree/
