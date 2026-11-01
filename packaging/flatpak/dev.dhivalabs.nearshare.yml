@@ -93,6 +93,7 @@ modules:
       - type: file
         path: dev.dhivalabs.nearshare.metainfo.xml
     build-commands:
+      - install -d /app/share
       - cp -a tree/usr/share/nearshare /app/share/nearshare
       - install -Dm755 nearshare.sh /app/bin/nearshare
       # Only the main entry: the send and toggle entries (and the Nautilus
