@@ -50,6 +50,10 @@ assert nearshare.__file__.startswith("/usr/share/nearshare/"), nearshare.__file_
 assert google.protobuf.__file__.startswith(os.environ["EXPECT_PROTOBUF"]), google.protobuf.__file__
 PY
 
+# The service binds its control socket in $XDG_RUNTIME_DIR (/run/user/<uid>
+# by default), which only a login session has; the repo's test job does the same.
+XDG_RUNTIME_DIR="$(mktemp -d)"
+export XDG_RUNTIME_DIR
 for m in test_loopback test_payload_routing test_security test_single_instance; do
   echo "== tests.$m"
   python3 -m "tests.$m"
