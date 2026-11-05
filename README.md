@@ -10,6 +10,9 @@ speaks Google's wire protocol directly, so it interoperates with:
 - **iPhone, iPad and Mac** over AirDrop, with an AWDL radio backend
   installed (see [docs/AIRDROP.md](docs/AIRDROP.md))
 
+NearShare runs on **Windows** too, from the same source; see
+[docs/WINDOWS.md](docs/WINDOWS.md).
+
 No cables, no cloud account, no companion app on the phone — just a shared
 WiFi network (or NearShare's own experimental hotspot, see [Direct
 mode](#direct-mode-experimental)) and a 4-digit PIN you confirm on both
@@ -22,6 +25,7 @@ screens.
 - [Usage](#usage)
 - [Direct mode (experimental)](#direct-mode-experimental)
 - [AirDrop](docs/AIRDROP.md)
+- [Windows](docs/WINDOWS.md)
 - [Limitations](#limitations)
 - [Security notes](#security-notes)
 
