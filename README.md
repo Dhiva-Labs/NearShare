@@ -4,27 +4,88 @@
 ![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
 ![Linux: deb | rpm | Arch | Flatpak | Snap](https://img.shields.io/badge/Linux-deb%20%7C%20rpm%20%7C%20Arch%20%7C%20Flatpak%20%7C%20Snap-informational?logo=linux&logoColor=white)
 
-Quick Share (formerly Nearby Share) for the Ubuntu/GNOME desktop. NearShare
-speaks Google's wire protocol directly, so it interoperates with:
+A Linux desktop client for Quick Share (formerly Nearby Share): send files to
+and receive files from Android, Windows and other Linux machines over the
+local network, from a GTK4 app, a CLI or the Files right-click menu.
+
+This is an **unofficial, independent** implementation. It is not affiliated
+with or endorsed by Google or Samsung (see
+[Trademarks and credits](#trademarks-and-credits)). It speaks the Quick Share
+wire protocol itself, written from public and community-reverse-engineered
+documentation, so it interoperates with:
 
 - **Android** Quick Share
 - **Windows** Quick Share
 - **macOS** NearDrop
-- **itself**, Linux ↔ Linux
+- **itself**, Linux to Linux
 
-No cables, no cloud account, no companion app on the phone — just a shared
+No cables, no cloud account, no companion app on the phone: just a shared
 WiFi network (or NearShare's own experimental hotspot, see [Direct
 mode](#direct-mode-experimental)) and a 4-digit PIN you confirm on both
 screens.
 
+153 weekly active devices across 53 countries on the Snap Store (November
+2026), per the publisher's Snap Store dashboard.
+
+## Try it
+
+```bash
+sudo snap install nearshare
+nearshare gui
+```
+
+More options (Debian/Ubuntu PPA, from source) are under [Install](#install).
+
+## Engineering highlights
+
+- **UKEY2 key exchange and SecureMessage crypto, implemented directly.**
+  P256_SHA512 commitment handshake, the HKDF key schedule, per-direction
+  AES-256-CBC + HMAC-SHA256 framing with an enforced sequence number, and
+  the 4-digit PIN derivation: [nearshare/core/crypto.py](nearshare/core/crypto.py).
+- **Two discovery paths.** mDNS advertise and browse on Google's Nearby
+  service type ([mdns.py](nearshare/core/mdns.py)), plus a BLE wake-up beacon
+  and scanner through BlueZ's D-Bus API, with automatic fallback to
+  mDNS-only when Bluetooth is unavailable ([ble.py](nearshare/core/ble.py)).
+- **Hardened file receive.** Peer-supplied filenames are reduced to a safe
+  basename, files are created with `O_EXCL|O_NOFOLLOW` so a symlink planted in
+  the download directory is not followed, declared sizes are checked against
+  free space, sharing frames are capped at 64 MiB, and inbound connections
+  are capped at 8 at a time
+  ([connection.py](nearshare/core/connection.py),
+  [service.py](nearshare/core/service.py)). Covered by
+  [tests/test_security.py](tests/test_security.py).
+- **UI-free protocol library.** `nearshare/core/` has no GTK or CLI imports;
+  the GUI, the CLI and the tests all drive the same code.
+- **End-to-end tests without a phone.**
+  [tests/test_loopback.py](tests/test_loopback.py) runs a full transfer
+  (handshake, introduction, chunked encrypted files, matching PIN and hashes)
+  on one machine; [tests/test_payload_routing.py](tests/test_payload_routing.py)
+  drives the receiver with a scripted fake sender through interleaved files,
+  duplicate chunks and mid-transfer cancel.
+- **CI on x64 and arm64** ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
+  runs the tests and builds the `.deb`, the snaps and the
+  rpm, Arch and Flatpak packages on their own distributions.
+
+## Status and limits
+
+NearShare is usable but has not had an independent security or cryptography
+review, and the protocol is reverse-engineered, so a change on Google's side
+can break interoperability. There are no GitHub releases; it is distributed
+through the Snap Store and the Dhiva Labs PPA. See [Limitations](#limitations)
+and [Security notes](#security-notes).
+
 ## Contents
 
+- [Try it](#try-it)
+- [Engineering highlights](#engineering-highlights)
+- [Status and limits](#status-and-limits)
 - [Working principle](#working-principle)
 - [Install](#install)
 - [Usage](#usage)
 - [Direct mode (experimental)](#direct-mode-experimental)
 - [Limitations](#limitations)
 - [Security notes](#security-notes)
+- [Development and tests](#development-and-tests)
 
 ## Working principle
 
@@ -263,8 +324,9 @@ Those artifacts are unsigned test builds, not releases.
 **Fedora, RHEL, openSUSE, Arch, and Flatpak.** CI also builds these from the
 `.deb` and tests each on its distribution (on Fedora, openSUSE Tumbleweed
 and Arch Linux; the Flatpak on Ubuntu with the Flathub runtime): imports,
-the protocol tests and the GTK app started headlessly. Once a GitHub
-release is published they are attached to it:
+the protocol tests and the GTK app started headlessly. There are no GitHub
+releases yet, so these files are unsigned CI build artifacts, not published
+downloads; the table shows what each package looks like:
 
 | Distribution | File | Install |
 |---|---|---|
@@ -467,6 +529,21 @@ covered further here.
   which forces PIN confirmation on *every single transfer* — there is
   no way to mark a device as permanently trusted. This is a deliberate
   simplification, not a missing feature to be worked around.
+
+## Development and tests
+
+Set up the virtualenv as in [From source](#from-source). Each test module is
+a standalone script that exits non-zero on failure; CI runs them like this:
+
+```bash
+for t in tests/test_*.py; do
+  .venv/bin/python -m "tests.$(basename "$t" .py)" || exit 1
+done
+```
+
+or one at a time, for example `.venv/bin/python -m tests.test_loopback`.
+The protobuf bindings in `nearshare/proto/` are generated from `protos/` by
+`tools/genproto.sh`.
 
 ## Trademarks and credits
 

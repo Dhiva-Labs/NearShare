@@ -241,7 +241,7 @@ After install, each logged-in user needs to log out and back in, or run
 - No man page for `nearshare` (lintian: `no-manual-page`) — cosmetic, not
   required for the package to work.
 - `Homepage:` is left out of `debian/control` — no project URL was found in
-  the repo (README/PLAN.md); add one if/when the project gets a public repo
+  the repo (README/docs/PLAN.md); add one if/when the project gets a public repo
   URL.
 - `packaging/PPA.md` (not owned by this pass — `debian/**` and
   `packaging/DEB.md` only) still shows `1.0.0-1`/`1.0.0~noble1` as the
