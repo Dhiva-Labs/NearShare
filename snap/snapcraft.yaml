@@ -2,6 +2,9 @@ name: nearshare
 title: NearShare
 version: '1.0.10'
 summary: Share files with nearby Android, Windows, macOS, and Linux devices
+website:
+  - https://github.com/Dhiva-Labs/NearShare
+  - https://learn.dhivalabs.com/apps/nearshare/
 description: |
   NearShare speaks Google's Quick Share / Nearby Share wire protocol
   directly, so it interoperates with:
