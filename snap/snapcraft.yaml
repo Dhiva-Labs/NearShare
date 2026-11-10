@@ -184,12 +184,23 @@ parts:
       # NB: /usr/bin/python3 explicitly. The python plugin puts the app
       # venv's bin first on PATH, and that interpreter cannot create a
       # new venv here (Permission denied on its own bin/python3).
+      # The gnome extension's build environment prepends the SDK's
+      # dist-packages to PYTHONPATH, and PYTHONPATH wins over a venv's
+      # own site-packages. Left set, this venv imports the SDK's pip
+      # (24.0) instead of the one it installs, so its bin/pip script
+      # (written by the newer pip) fails on an import the old pip lacks,
+      # and the SDK's packages could shadow protobuf/grpcio-tools too.
+      # Run the whole codegen with PYTHONPATH unset so the venv sees
+      # only itself.
       protogen=/tmp/nearshare-protogen
       rm -rf "$protogen"
-      /usr/bin/python3 -m venv "$protogen"
-      "$protogen"/bin/pip install --no-cache-dir --upgrade pip
-      "$protogen"/bin/pip install --no-cache-dir grpcio-tools protobuf
-      bash "$CRAFT_PART_SRC"/tools/genproto.sh "$protogen"/bin/python3
+      (
+        unset PYTHONPATH
+        /usr/bin/python3 -m venv "$protogen"
+        "$protogen"/bin/python3 -m pip install --no-cache-dir --upgrade pip
+        "$protogen"/bin/python3 -m pip install --no-cache-dir grpcio-tools protobuf
+        bash "$CRAFT_PART_SRC"/tools/genproto.sh "$protogen"/bin/python3
+      )
       rm -rf "$protogen"
 
       # ---- stage the nearshare package itself ---------------------
