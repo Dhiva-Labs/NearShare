@@ -36,6 +36,16 @@ log = logging.getLogger("nearshare.connection")
 CHUNK_SIZE = 512 * 1024
 KEEP_ALIVE_INTERVAL = 10.0
 KEEP_ALIVE_TIMEOUT = 30.0
+# The handshake is machine-to-machine and finishes in well under a second.
+# Without a deadline a peer that connects and says nothing holds one of the
+# few inbound slots for as long as it likes, and eight of them lock every
+# real sender out.
+HANDSHAKE_TIMEOUT = 20.0
+# Frames read before the cipher is established are tiny (a connection
+# request, the three UKEY2 messages, a connection response). The general
+# 100 MiB ceiling let an unauthenticated peer make us buffer that much per
+# connection.
+MAX_PLAINTEXT_FRAME = 64 * 1024
 
 # Sharing-layer control frames (Introduction, PairedKey*, text shares,
 # progress/cancel control) are all small by construction; the only ones
@@ -74,10 +84,11 @@ def safe_filename(name: str, fallback: str = "received-file") -> str:
     return base[:200]            # keep well under NAME_MAX
 
 
-async def read_frame(reader: asyncio.StreamReader) -> bytes:
+async def read_frame(reader: asyncio.StreamReader,
+                     max_len: int = 100 * 1024 * 1024) -> bytes:
     header = await reader.readexactly(4)
     length = int.from_bytes(header, "big")
-    if length > 100 * 1024 * 1024:
+    if length > max_len:
         raise HandshakeError(f"absurd frame length {length}")
     return await reader.readexactly(length)
 
@@ -315,7 +326,7 @@ class InboundConnection(_ConnectionBase):
     async def run(self) -> None:
         keep_alive_task: asyncio.Task | None = None
         try:
-            await self._handshake()
+            await asyncio.wait_for(self._handshake(), HANDSHAKE_TIMEOUT)
             keep_alive_task = asyncio.create_task(self._send_keep_alives())
             await self._sharing_phase()
         except (ConnectionError, asyncio.IncompleteReadError,
@@ -330,7 +341,7 @@ class InboundConnection(_ConnectionBase):
 
     async def _handshake(self) -> None:
         # 1. Plaintext connection request tells us who is knocking.
-        raw = await read_frame(self.reader)
+        raw = await read_frame(self.reader, MAX_PLAINTEXT_FRAME)
         frame = ow.OfflineFrame()
         frame.ParseFromString(raw)
         if frame.v1.type != ow.V1Frame.CONNECTION_REQUEST:
@@ -347,11 +358,11 @@ class InboundConnection(_ConnectionBase):
 
         # 2. UKEY2: client init -> server init -> client finish.
         server = Ukey2Server()
-        m1 = await read_frame(self.reader)
+        m1 = await read_frame(self.reader, MAX_PLAINTEXT_FRAME)
         m2 = server.handle_client_init(m1)
         write_frame(self.writer, m2)
         await self.writer.drain()
-        m3 = await read_frame(self.reader)
+        m3 = await read_frame(self.reader, MAX_PLAINTEXT_FRAME)
         keys = server.handle_client_finish(m3)
         self.cipher = D2DCipher(keys)
 
@@ -364,7 +375,8 @@ class InboundConnection(_ConnectionBase):
         resp.v1.connection_response.os_info.type = ow.OsInfo.LINUX
         await self._send_plain(resp)
         peer_resp = ow.OfflineFrame()
-        peer_resp.ParseFromString(await read_frame(self.reader))
+        peer_resp.ParseFromString(
+            await read_frame(self.reader, MAX_PLAINTEXT_FRAME))
         if (peer_resp.v1.type != ow.V1Frame.CONNECTION_RESPONSE or
                 peer_resp.v1.connection_response.response !=
                 ow.ConnectionResponseFrame.ACCEPT):
@@ -644,7 +656,7 @@ class OutboundConnection(_ConnectionBase):
         client = Ukey2Client()
         write_frame(self.writer, client.client_init())
         await self.writer.drain()
-        m2 = await read_frame(self.reader)
+        m2 = await read_frame(self.reader, MAX_PLAINTEXT_FRAME)
         m3, keys = client.handle_server_init(m2)
         write_frame(self.writer, m3)
         await self.writer.drain()
@@ -659,7 +671,8 @@ class OutboundConnection(_ConnectionBase):
         resp.v1.connection_response.os_info.type = ow.OsInfo.LINUX
         await self._send_plain(resp)
         peer_resp = ow.OfflineFrame()
-        peer_resp.ParseFromString(await read_frame(self.reader))
+        peer_resp.ParseFromString(
+            await read_frame(self.reader, MAX_PLAINTEXT_FRAME))
         if (peer_resp.v1.type != ow.V1Frame.CONNECTION_RESPONSE or
                 peer_resp.v1.connection_response.response !=
                 ow.ConnectionResponseFrame.ACCEPT):

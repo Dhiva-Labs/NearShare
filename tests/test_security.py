@@ -409,6 +409,8 @@ async def _run_async_tests() -> None:
     await test_hostile_offset_does_not_create_sparse_file(tmp)
     await test_huge_declared_size_rejected_before_dialog(tmp)
     await test_concurrent_inbound_connections_are_capped(tmp)
+    await test_silent_peer_is_dropped_at_handshake_deadline(tmp)
+    await test_plaintext_frame_is_capped_before_authentication(tmp)
     await test_bytes_payload_size_is_bounded(tmp)
     await test_control_socket_private_perms_despite_permissive_umask()
     await test_control_socket_handles_malformed_input()
@@ -458,6 +460,59 @@ async def test_concurrent_inbound_connections_are_capped(tmp: Path) -> None:
         await svc.stop()
     print(f"connection cap: {service_mod.MAX_CONCURRENT_INBOUND} accepted, "
           "the next refused immediately")
+
+
+async def test_silent_peer_is_dropped_at_handshake_deadline(tmp: Path) -> None:
+    """A peer that connects and never speaks used to hold its inbound slot
+    forever: the plaintext handshake reads had no timeout, so eight idle
+    sockets locked every real sender out. The handshake now has a
+    deadline and the connection is closed when it passes."""
+    downloads = tmp / "sec-silent"
+    original = connection_mod.HANDSHAKE_TIMEOUT
+    connection_mod.HANDSHAKE_TIMEOUT = 0.5
+    server, port = await start_receiver(downloads, Events())
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        # Say nothing. The receiver must hang up on its own.
+        data = await asyncio.wait_for(reader.read(1), timeout=5)
+        assert data == b"", "a silent peer was not disconnected"
+        writer.close()
+
+        # Stalling halfway (a header promising bytes that never come)
+        # is the same attack one step later.
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write((16).to_bytes(4, "big") + b"abc")
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(1), timeout=5)
+        assert data == b"", "a stalled handshake was not disconnected"
+        writer.close()
+    finally:
+        connection_mod.HANDSHAKE_TIMEOUT = original
+        server.close()
+        await server.wait_closed()
+    print("silent peer: dropped at the handshake deadline")
+
+
+async def test_plaintext_frame_is_capped_before_authentication(tmp: Path) -> None:
+    """Before the cipher exists every frame is a few hundred bytes. The
+    general 100 MiB ceiling let an unauthenticated peer make the receiver
+    buffer that much per connection; anything over the plaintext cap is
+    now refused on the header alone, before a byte of body is read."""
+    downloads = tmp / "sec-plaincap"
+    server, port = await start_receiver(downloads, Events())
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        too_big = connection_mod.MAX_PLAINTEXT_FRAME + 1
+        writer.write(too_big.to_bytes(4, "big"))
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(1), timeout=5)
+        assert data == b"", "an oversized plaintext frame was not refused"
+        writer.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+    print(f"plaintext frame cap: {connection_mod.MAX_PLAINTEXT_FRAME} bytes, "
+          "larger refused before authentication")
 
 
 if __name__ == "__main__":
