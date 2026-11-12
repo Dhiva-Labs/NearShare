@@ -19,6 +19,8 @@ documentation, so it interoperates with:
 - **macOS** NearDrop
 - **itself**, Linux to Linux
 
+**Documentation:** step-by-step guides at [learn.dhivalabs.com](https://learn.dhivalabs.com/apps/nearshare/): [install](https://learn.dhivalabs.com/apps/nearshare/install) · [beginner guide](https://learn.dhivalabs.com/apps/nearshare/getting-started) · [troubleshooting](https://learn.dhivalabs.com/apps/nearshare/faq). New to the topic? Try the [Networking and SSH](https://learn.dhivalabs.com/tracks/networking/) learning track.
+
 No cables, no cloud account, no companion app on the phone: just a shared
 WiFi network (or NearShare's own experimental hotspot, see [Direct
 mode](#direct-mode-experimental)) and a 4-digit PIN you confirm on both
