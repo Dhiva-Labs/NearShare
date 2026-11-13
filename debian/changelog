@@ -1,3 +1,17 @@
+nearshare (1.1.0~noble1) noble; urgency=medium
+
+  * Redesigned main window: click a device or drop files on it to send,
+    the PIN is shown while sending, transfers can be cancelled, and
+    incoming files can be accepted from the notification.
+  * New Preferences (device name, download folder, start at login) and
+    About dialogs.
+  * Faster start: bytecode is compiled at install time and the desktop
+    integration checks no longer block the first frame.
+  * The receiver notices when the sender gives up before an answer.
+  * See CHANGELOG.md for the full list.
+
+ -- Dhivakar R <dhivakar1010@gmail.com>  Sat, 14 Nov 2026 03:00:00 +0530
+
 nearshare (1.0.8~noble1) noble; urgency=medium
 
   * Declare MimeType so the send entry appears in Open With.

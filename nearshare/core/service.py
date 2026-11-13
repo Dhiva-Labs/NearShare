@@ -104,6 +104,10 @@ class NearShareService:
         self.browser = Browser(on_change=self._peers_changed)
         self.on_visibility_changed: Callable[[bool], None] | None = None
         self.on_peers_changed: Callable[[dict[str, Peer]], None] | None = None
+        # Running transfers by (device name, "send" | "receive"), so the
+        # UI can cancel one. A cancelled task closes its connection on the
+        # way out, which is what tells the other side.
+        self._transfers: dict[tuple[str, str], asyncio.Task] = {}
 
     # ------------------------------------------------------------ lifecycle
 
@@ -232,7 +236,7 @@ class NearShareService:
         try:
             conn = InboundConnection(reader, writer, self.events,
                                      self.device_name, self.download_dir)
-            await conn.run()
+            await self._run_tracked(conn, "receive")
         finally:
             self._inbound_count -= 1
 
@@ -241,7 +245,59 @@ class NearShareService:
         conn = OutboundConnection(peer.host, peer.port, self.events,
                                   self.device_name, files,
                                   peer_name=peer.device_name)
-        await conn.run()
+        await self._run_tracked(conn, "send", peer.device_name)
+
+    async def _run_tracked(self, conn, direction: str,
+                           name: str | None = None) -> None:
+        """Run a connection as a task cancel_transfer() can find.
+
+        An inbound connection only learns the peer's name during its
+        handshake, so it is looked up by `conn.peer_name` at cancel time
+        rather than registered under a name here.
+        """
+        task = asyncio.ensure_future(conn.run())
+        key = (name or id(conn), direction)
+        self._transfers[key] = task
+        task.nearshare_conn = conn  # type: ignore[attr-defined]
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+            raise
+        finally:
+            self._transfers.pop(key, None)
+
+    def cancel_transfer(self, device: str, direction: str) -> bool:
+        """Stop the running transfer with `device`, if there is one.
+
+        Returns whether a transfer was found. Partial received files are
+        deleted by the connection as it unwinds.
+        """
+        for (name, kind), task in list(self._transfers.items()):
+            if kind != direction or task.done():
+                continue
+            conn = getattr(task, "nearshare_conn", None)
+            if name == device or getattr(conn, "peer_name", None) == device:
+                task.cancel()
+                return True
+        return False
+
+    async def set_device_name(self, name: str) -> None:
+        """Change the name nearby devices see, re-advertising if visible."""
+        name = name.strip()
+        if not name or name == self.device_name:
+            return
+        self.device_name = name
+        if self._advertiser is None:
+            return
+        was_visible = self._advertiser.active
+        if was_visible:
+            await self._advertiser.stop()
+        self._advertiser = Advertiser(name, self.endpoint_id,
+                                      self._advertiser.port)
+        if was_visible:
+            await self._advertiser.start()
 
     def _peers_changed(self, peers: dict[str, Peer]) -> None:
         if self.on_peers_changed:

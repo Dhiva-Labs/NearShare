@@ -287,8 +287,8 @@ sequenceDiagram
 
 ## Install
 
-Target platform: Ubuntu 24.04 / GNOME, on x86-64 (amd64) and ARM64
-(aarch64) machines alike. The application is pure Python, so the code is
+Target platform: Ubuntu 24.04 and later / GNOME, on x86-64 (amd64) and
+ARM64 (aarch64) machines alike. The application is pure Python, so the code is
 the same on both; only the snap's compiled dependencies differ per
 architecture.
 
@@ -302,9 +302,13 @@ sudo snap connect nearshare:bluez            # optional: Bluetooth LE beacon
 sudo snap connect nearshare:network-manager  # optional: Direct mode
 ```
 
-**Debian package** from the Dhiva Labs PPA. It is `Architecture: all`, so
-one package serves both `amd64` and `arm64`, and it also installs the
-Files (Nautilus) right-click "Send with NearShare" item:
+The app lists these two commands, each with a copy button, until the
+interfaces are connected.
+
+**Debian package** from the Dhiva Labs PPA, built for Ubuntu 24.04, 26.04
+and 26.10. It is `Architecture: all`, so one package serves both `amd64`
+and `arm64`, and it also installs the Files (Nautilus) right-click "Send
+with NearShare" item:
 
 ```bash
 sudo add-apt-repository ppa:dhiva-labs/apps
@@ -326,9 +330,9 @@ Those artifacts are unsigned test builds, not releases.
 **Fedora, RHEL, openSUSE, Arch, and Flatpak.** CI also builds these from the
 `.deb` and tests each on its distribution (on Fedora, openSUSE Tumbleweed
 and Arch Linux; the Flatpak on Ubuntu with the Flathub runtime): imports,
-the protocol tests and the GTK app started headlessly. There are no GitHub
-releases yet, so these files are unsigned CI build artifacts, not published
-downloads; the table shows what each package looks like:
+the protocol tests and the GTK app started headlessly. They are attached to
+each [GitHub release](https://github.com/Dhiva-Labs/NearShare/releases),
+with the `.deb`, both snaps and a `SHA256SUMS` file:
 
 | Distribution | File | Install |
 |---|---|---|
@@ -410,9 +414,24 @@ exec that for you inside the project's venv.
 nearshare gui
 ```
 
-Opens the main window: a visibility switch, the nearby-devices list for
-sending, and incoming-transfer prompts (PIN + accept/decline) when
-someone sends to you.
+Opens the main window: a visibility switch, the nearby devices, and the
+transfers in progress.
+
+- **Send**: click a device and choose files, or drop files on it. Dropping
+  files anywhere else in the window (or the Send Files button, Ctrl+O)
+  holds them until you pick a device. The row shows the PIN while the
+  other person decides, then progress, speed and time left. Its button
+  cancels the transfer.
+- **Receive**: an incoming transfer raises a dialog with the PIN and a
+  notification with Accept and Decline buttons, so it can be answered
+  without finding the window. A second notification offers Show in Files
+  when the files have arrived.
+- **Preferences** (Ctrl+,): the name other devices see, where received
+  files are saved, and Start at login.
+
+Closing the window keeps NearShare running so it can still receive; quit
+from the menu or with Ctrl+Q. `nearshare gui --background` starts it
+without showing the window, which is what Start at login uses.
 
 ### CLI
 
@@ -544,6 +563,12 @@ done
 ```
 
 or one at a time, for example `.venv/bin/python -m tests.test_loopback`.
+`tools/gui-smoke.py` starts the real GTK application for a few seconds and
+checks its window and receive service; CI runs it under Xvfb against the
+installed `.deb`, snap, `.rpm`, Arch package and Flatpak.
+
+Releases are cut from a `v*` tag and published by CI; see
+[packaging/RELEASING.md](packaging/RELEASING.md).
 The protobuf bindings in `nearshare/proto/` are generated from `protos/` by
 `tools/genproto.sh`.
 

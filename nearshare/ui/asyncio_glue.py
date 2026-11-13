@@ -80,7 +80,12 @@ class AsyncioThread:
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
         if on_done is not None:
             def _relay(f: concurrent.futures.Future) -> None:
-                exc = f.exception()
+                # A cancelled future raises from .exception() instead of
+                # returning it; hand the cancellation on like any error.
+                if f.cancelled():
+                    exc: BaseException | None = concurrent.futures.CancelledError()
+                else:
+                    exc = f.exception()
                 result = None if exc is not None else f.result()
                 GLib.idle_add(on_done, result, exc)
             fut.add_done_callback(_relay)
@@ -103,6 +108,45 @@ def idle(fn: Callable[..., None], *args: Any) -> None:
         fn(*args)
         return False
     GLib.idle_add(_call)
+
+
+class Coalescer:
+    """Collapse a burst of keyed updates from the asyncio thread into at
+    most one GTK-thread call per key every `interval_ms`.
+
+    Progress callbacks fire once per 512 KB chunk; on a fast link that is
+    hundreds of main-loop wake-ups a second, each relabelling a row, for
+    changes nobody can see. Only the newest value per key is kept.
+    """
+
+    def __init__(self, deliver: Callable[[Any, Any], None],
+                 interval_ms: int = 100) -> None:
+        self._deliver = deliver
+        self._interval_ms = interval_ms
+        self._lock = threading.Lock()
+        self._pending: dict[Any, Any] = {}
+        self._scheduled = False
+
+    def push(self, key: Any, value: Any) -> None:
+        with self._lock:
+            self._pending[key] = value
+            if self._scheduled:
+                return
+            self._scheduled = True
+        GLib.timeout_add(self._interval_ms, self._flush)
+
+    def drop(self, key: Any) -> None:
+        """Forget a pending update, e.g. once its transfer has finished."""
+        with self._lock:
+            self._pending.pop(key, None)
+
+    def _flush(self) -> bool:
+        with self._lock:
+            pending, self._pending = self._pending, {}
+            self._scheduled = False
+        for key, value in pending.items():
+            self._deliver(key, value)
+        return False
 
 
 def bridge_future_to_asyncio(
