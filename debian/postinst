@@ -30,6 +30,13 @@ case "$1" in
                 >/dev/null 2>&1 || true
         fi
 
+        # /usr/share/nearshare is not writable by users, so Python could
+        # never cache its bytecode there and every launch would recompile
+        # the whole app. Compile it once now; prerm removes the result.
+        if command -v py3compile >/dev/null 2>&1; then
+            py3compile /usr/share/nearshare >/dev/null 2>&1 || true
+        fi
+
         echo "nearshare: installed the system-wide Nautilus right-click"
         echo "  \"Send with NearShare\" item. Each logged-in user needs to"
         echo "  either log out and back in, or run once:"

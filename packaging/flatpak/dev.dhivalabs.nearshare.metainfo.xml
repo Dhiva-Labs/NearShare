@@ -17,6 +17,11 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.0" date="2026-11-14">
+      <description>
+        <p>A redesigned window: click a device or drop files on it to send, see the PIN while sending, cancel a transfer, and accept incoming files from the notification. New Preferences for the device name, download folder and starting at login.</p>
+      </description>
+    </release>
     <release version="1.0.10" date="2026-10-16"/>
   </releases>
 </component>

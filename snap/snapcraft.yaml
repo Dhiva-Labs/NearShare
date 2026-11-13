@@ -1,59 +1,61 @@
 name: nearshare
 title: NearShare
-version: '1.0.10'
+version: '1.1.0'
 summary: Share files with nearby Android, Windows, macOS, and Linux devices
 website:
   - https://github.com/Dhiva-Labs/NearShare
   - https://learn.dhivalabs.com/apps/nearshare/
+source-code: https://github.com/Dhiva-Labs/NearShare
+issues: https://github.com/Dhiva-Labs/NearShare/issues
+contact: https://github.com/Dhiva-Labs/NearShare/issues
 description: |
-  NearShare speaks Google's Quick Share / Nearby Share wire protocol
-  directly, so it interoperates with:
+  Send and receive files between this computer and nearby Android phones,
+  Windows PCs, Macs and other Linux machines. NearShare speaks the Quick
+  Share (formerly Nearby Share) protocol itself, so the other device needs
+  no extra app:
 
-    - Android Quick Share
-    - Windows Quick Share
-    - macOS NearDrop
-    - itself, Linux <-> Linux
+    - Android: Quick Share, built in
+    - Windows: Quick Share for Windows
+    - macOS: NearDrop
+    - Linux: NearShare
 
-  No cables, no cloud account, and no companion app on the phone -- just a
-  shared WiFi network (or NearShare's own experimental Direct-mode
-  hotspot) and a 4-digit PIN you confirm on both screens.
+  No cable, no account and no cloud. Both devices only need to be on the
+  same Wi-Fi network (or use Direct mode, NearShare's own temporary
+  hotspot). Every transfer is end-to-end encrypted and confirmed with a
+  4-digit PIN shown on both screens.
 
-  Discovery uses mDNS (python-zeroconf, which binds its own multicast
-  sockets rather than talking to Avahi) plus an optional Bluetooth LE
-  "wake up" beacon so an Android phone's share sheet notices this machine
-  proactively. Every transfer is end-to-end encrypted (UKEY2 key
-  exchange, then AES-256-CBC + HMAC-SHA256 per frame) and requires a
-  manual PIN confirmation on both devices -- there is no persistent
-  cross-device trust (no Google-account "paired key" support).
+  **What you can do**
 
-  AFTER INSTALLING -- two commands
-  --------------------------------
-  Bluetooth discovery and Direct mode need interfaces that snapd does
-  not connect automatically. Run both, then start the app:
+    - Click a nearby device, or drop files on it, to send
+    - Accept or decline incoming files from the window or straight from
+      the notification
+    - Right-click a file in Files, then Open With > NearShare
+    - Start at login, hidden, so the computer is always ready to receive
+    - Script it: `nearshare send photo.jpg`, `nearshare toggle`,
+      `nearshare status`
 
-    sudo snap connect nearshare:bluez
-    sudo snap connect nearshare:network-manager
+  **After installing: two optional commands**
 
-  Without bluez the app still works, but your phone may only see this
-  machine while the phone's own Quick Share screen is open. Without
-  network-manager, Direct mode (the built-in hotspot for when there is
-  no shared WiFi) is unavailable. Everything else -- discovery,
-  sending, receiving -- works with no extra setup.
+  Two features use interfaces that snapd does not connect by itself:
 
-  Optional: a Super+Shift+S shortcut to toggle visibility can be bound
-  from the app's own setup panel, or with `nearshare install`.
+      sudo snap connect nearshare:bluez
+      sudo snap connect nearshare:network-manager
 
-  Right-click "Send with NearShare" in Files
-  ------------------------------------------
-  Not available in the snap. Strict confinement forbids writing to
-  ~/.local/share/nautilus, so no snap can install a Files extension.
-  If you want right-click sharing, install the Debian package instead:
+  `bluez` lets a phone find this computer without Quick Share being open
+  on the phone first. `network-manager` enables Direct mode. Sending and
+  receiving on a shared Wi-Fi network work without either, and the app
+  shows these commands with a copy button until they are connected.
 
-    sudo add-apt-repository ppa:dhiva-labs/apps
-    sudo apt install nearshare
+  **Right-click "Send with NearShare" as a top-level menu item**
 
-  The .deb ships a system-wide Files extension and needs no per-user
-  setup. Both builds are the same application otherwise.
+  A confined snap cannot add an extension to Files, so the snap offers
+  Open With instead. For the top-level menu item, use the .deb:
+
+      sudo add-apt-repository ppa:dhiva-labs/apps
+      sudo apt install nearshare
+
+  NearShare is an independent project, not affiliated with Google or
+  Samsung.
 
 icon: data/icons/dev.dhivalabs.nearshare.svg
 license: MIT
@@ -98,10 +100,8 @@ apps:
     environment:
       HOME: $SNAP_REAL_HOME
 
-  # `nearshare.gui` -- the desktop launcher target. Runs `python -m
-  # nearshare` (the GTK app) directly rather than going through
-  # nearshare.cli's own "gui" subcommand, so there's one less exec hop
-  # and no dependency on argv handling in two different places.
+  # `nearshare.send` -- backs the "Open With > NearShare (send to phone)"
+  # entry in the file manager.
   send:
     command: bin/nearshare-send
     extensions: [gnome]
@@ -114,10 +114,19 @@ apps:
     environment:
       HOME: $SNAP_REAL_HOME
 
+  # `nearshare.gui` -- the desktop launcher target. Runs `python -m
+  # nearshare` (the GTK app) directly rather than going through
+  # nearshare.cli's own "gui" subcommand, so there's one less exec hop
+  # and no dependency on argv handling in two different places.
   gui:
     command: bin/nearshare-gui
     extensions: [gnome]
     desktop: usr/share/applications/dev.dhivalabs.nearshare.desktop
+    # "Start at login" in Preferences. snapd's session agent runs this
+    # app at login when a file of this name exists in
+    # $SNAP_USER_DATA/.config/autostart, which is where the app writes it
+    # (nearshare/autostart.py). The name here and there must match.
+    autostart: nearshare-autostart.desktop
     plugs:
       - network
       - network-bind
@@ -155,17 +164,6 @@ parts:
       - zeroconf
       - protobuf
       - cryptography
-    # nmcli (Direct-mode hotspot, nearshare/core/hotspot.py) is invoked
-    # as a subprocess by binary name -- strict confinement doesn't let a
-    # snap exec arbitrary host binaries, so the nmcli executable itself
-    # has to ship inside the snap. The `network-manager` interface
-    # (plugged, manually connected) separately grants the D-Bus access
-    # this staged nmcli needs to reach the HOST's NetworkManager daemon;
-    # staging the package alone does not grant that access, and plugging
-    # the interface alone would leave the app with no nmcli binary to
-    # run in the first place -- both halves are required together.
-    stage-packages:
-      - network-manager
     override-build: |
       craftctl default
 
@@ -220,6 +218,27 @@ parts:
       find "$CRAFT_PART_INSTALL"/app/nearshare -name '__pycache__' -exec rm -rf {} +
       find "$CRAFT_PART_INSTALL"/app/nearshare -name '*.pyc' -delete
 
+      # ---- drop build-only tooling ----------------------------------
+      # The python plugin leaves pip (15 MB) and the venv's activate
+      # scripts in the install tree. Nothing installs packages into a
+      # read-only snap at run time.
+      rm -rf "$CRAFT_PART_INSTALL"/lib/python3*/site-packages/pip \
+             "$CRAFT_PART_INSTALL"/lib/python3*/site-packages/pip-*.dist-info \
+             "$CRAFT_PART_INSTALL"/bin/pip* \
+             "$CRAFT_PART_INSTALL"/bin/activate* \
+             "$CRAFT_PART_INSTALL"/bin/Activate.ps1
+
+      # ---- precompiled bytecode --------------------------------------
+      # A snap is a read-only image, so Python can never write its
+      # __pycache__ there: without this, every launch recompiles every
+      # module of the app from source. Compile once here instead.
+      # unchecked-hash: the default .pyc is validated against the
+      # source's mtime, and squashfs timestamps are not something to
+      # depend on; the image is immutable, so the check buys nothing.
+      "$CRAFT_PART_INSTALL"/bin/python3 -m compileall -q \
+        --invalidation-mode unchecked-hash \
+        "$CRAFT_PART_INSTALL"/app/nearshare
+
       # ---- launcher wrappers -----------------------------------------
       # `command:` can't itself `cd` first, so each app gets a tiny
       # wrapper (mirrors what bin/nearshare does for the non-snap
@@ -251,6 +270,30 @@ parts:
                 "$CRAFT_PART_INSTALL"/bin/nearshare-gui \
                 "$CRAFT_PART_INSTALL"/bin/nearshare-send
 
+  nmcli:
+    plugin: nil
+    # nmcli (Direct-mode hotspot, nearshare/core/hotspot.py) is invoked
+    # as a subprocess by binary name -- strict confinement doesn't let a
+    # snap exec arbitrary host binaries, so the nmcli executable itself
+    # has to ship inside the snap. The `network-manager` interface
+    # (plugged, manually connected) separately grants the D-Bus access
+    # this staged nmcli needs to reach the HOST's NetworkManager daemon;
+    # staging the package alone does not grant that access, and plugging
+    # the interface alone would leave the app with no nmcli binary to
+    # run in the first place -- both halves are required together.
+    stage-packages:
+      - network-manager
+    # Only nmcli and libnm, the one library it needs that the base snap
+    # does not have. The package also brings the NetworkManager daemon
+    # with its plugins, units, documentation and a dozen libraries only
+    # the daemon links (curl, ModemManager, teamd, ...); none of that
+    # could run or be read inside the snap. CI runs `nmcli --version`
+    # inside the installed snap on both architectures, which fails if
+    # this list ever misses a library.
+    prime:
+      - usr/bin/nmcli
+      - usr/lib/*/libnm.so*
+
   desktop-files:
     plugin: dump
     source: data
@@ -258,13 +301,10 @@ parts:
       icons/dev.dhivalabs.nearshare.svg: usr/share/icons/hicolor/scalable/apps/dev.dhivalabs.nearshare.svg
       dev.dhivalabs.nearshare.desktop: usr/share/applications/dev.dhivalabs.nearshare.desktop
       nearshare-send.desktop: usr/share/applications/nearshare-send.desktop
-    # Only the main app launcher ships: nearshare-send.desktop (Nautilus
-    # %F argument passing) and nearshare-toggle.desktop (meant to be
-    # targeted by an absolute-path gsettings custom keybinding, per
-    # nearshare/cli.py's _print_shortcut_commands) don't map onto a
-    # strictly-confined snap's desktop-file export, which only wires up
-    # the ONE file referenced by an app's `desktop:` key above -- see
-    # packaging/SNAP.md.
+    # The main launcher and the "Open With" send entry ship, each wired
+    # to an app through its `desktop:` key above. nearshare-toggle.desktop
+    # does not: it exists to be the target of a GNOME custom keybinding,
+    # which a confined snap cannot create (see packaging/SNAP.md).
     stage:
       - usr/share/icons/hicolor/scalable/apps/dev.dhivalabs.nearshare.svg
       - usr/share/applications/dev.dhivalabs.nearshare.desktop

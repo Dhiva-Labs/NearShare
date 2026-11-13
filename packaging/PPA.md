@@ -1,5 +1,11 @@
 # Publishing `nearshare` to a Launchpad PPA
 
+> **Short version.** `packaging/ppa-upload.sh` does everything below for
+> every supported series (currently noble, resolute and stonking), and CI
+> runs it on each release tag. [RELEASING.md](RELEASING.md) covers the
+> secrets it needs. The rest of this file explains what the script does
+> and why, for when something goes wrong.
+
 This assumes the same house PPA other Dhiva Labs Linux packages use,
 `ppa:dhiva-labs/apps` (see BranchPilot's `packaging/PPA.md`) — **confirm this
 is where NearShare should actually land** before the first upload; nothing

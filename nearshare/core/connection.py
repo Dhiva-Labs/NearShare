@@ -184,6 +184,9 @@ class Events:
     on_complete: Callable[[str, list[Path]], None] | None = None
     on_error: Callable[[str, str], None] | None = None
     on_text: Callable[[str, str], None] | None = None  # device, text
+    # Outbound only: the PIN is known as soon as the key exchange is done,
+    # which is before the receiver's human has accepted. device, pin.
+    on_pin: Callable[[str, str], None] | None = None
 
 
 class _ConnectionBase:
@@ -450,10 +453,13 @@ class InboundConnection(_ConnectionBase):
             accepted = False
             if self.events.on_transfer_request:
                 try:
-                    accepted = await asyncio.wait_for(
-                        self.events.on_transfer_request(request), timeout=60)
-                except asyncio.TimeoutError:
+                    accepted = await self._ask_user(request)
+                except asyncio.TimeoutError as exc:
+                    # Still answer with a proper REJECT below, but let the
+                    # UI know so it can take its dialog down.
                     accepted = False
+                    if self.events.on_error:
+                        self.events.on_error(self.peer_name, str(exc))
 
         resp = wf.Frame()
         resp.version = wf.Frame.V1
@@ -466,6 +472,45 @@ class InboundConnection(_ConnectionBase):
             return
 
         await self._receive_payloads(request, text_ids=text_ids)
+
+    async def _ask_user(self, request: TransferRequest) -> bool:
+        """Wait for the human's answer, the sender hanging up, or 60s.
+
+        Without watching the socket, a sender who gave up left the accept
+        dialog on screen until the timeout, and an Accept pressed in the
+        meantime went nowhere. Both early exits raise, so on_error tells
+        the UI to take the dialog down.
+        """
+        decision = asyncio.ensure_future(
+            self.events.on_transfer_request(request))
+        gone = asyncio.ensure_future(self._sender_gone())
+        try:
+            done, _ = await asyncio.wait(
+                {decision, gone}, timeout=60,
+                return_when=asyncio.FIRST_COMPLETED)
+            if decision in done:
+                return bool(decision.result())
+            if gone in done:
+                raise ConnectionResetError("the sender cancelled")
+            raise asyncio.TimeoutError("no answer within 60 seconds")
+        finally:
+            for task in (decision, gone):
+                task.cancel()
+            await asyncio.gather(decision, gone, return_exceptions=True)
+
+    async def _sender_gone(self) -> None:
+        """Return once the peer has closed its end of the connection.
+
+        Deliberately does not read: a read cancelled between a frame's
+        length and its body would desynchronise the stream for the
+        payloads that follow an Accept. The reader's end-of-file flag is
+        set by the transport whether or not anything is reading.
+        (StreamReader.at_eof() is no use here: it also needs the buffer
+        to be empty, and the peer's goodbye frame is sitting in it.)
+        """
+        while not (getattr(self.reader, "_eof", False)
+                   or self.reader.exception() is not None):
+            await asyncio.sleep(0.25)
 
     def _open_dest(self, offer: FileOffer) -> None:
         self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -662,6 +707,8 @@ class OutboundConnection(_ConnectionBase):
         await self.writer.drain()
         self.cipher = D2DCipher(keys)
         self.pin = keys.pin
+        if self.events.on_pin:
+            self.events.on_pin(self.peer_name, self.pin)
 
         resp = ow.OfflineFrame()
         resp.version = ow.OfflineFrame.V1

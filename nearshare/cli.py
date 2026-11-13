@@ -239,7 +239,10 @@ def cmd_forget(args: argparse.Namespace) -> int:
 
 def cmd_gui(args: argparse.Namespace) -> int:
     """Exec the GUI app in place of this process."""
-    os.execv(sys.executable, [sys.executable, "-m", "nearshare"])
+    argv = [sys.executable, "-m", "nearshare"]
+    if getattr(args, "background", False):
+        argv.append("--background")
+    os.execv(sys.executable, argv)
     return 0  # pragma: no cover - unreachable, execv replaces the process
 
 
@@ -1030,6 +1033,27 @@ _SNAP_HOME_REASON = ("strict snap confinement's `home` interface doesn't "
                      "grant access to hidden dot-directories under $HOME")
 
 
+# Plugs snapd does not connect automatically (see snap/snapcraft.yaml).
+SNAP_MANUAL_INTERFACES = ("bluez", "network-manager")
+
+
+def snap_interface_connected(name: str) -> bool | None:
+    """Whether the snap's plug `name` is connected; None if that cannot
+    be determined (not in a snap, or snapctl missing or failing)."""
+    if not _in_snap():
+        return None
+    try:
+        proc = subprocess.run(["snapctl", "is-connected", name],
+                              capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    return None
+
+
 def integration_status() -> dict[str, Any]:
     """What `nearshare install` has already accomplished -- used by its
     own idempotency messages and by the GTK app's Finish-setup banner
@@ -1070,7 +1094,10 @@ def integration_status() -> dict[str, Any]:
                         (not nautilus and nautilus_fixable) or
                         (not desktop_entries and home_fixable) or
                         (not launcher_on_path and home_fixable))
-    return {"snap": snap, "launcher_on_path": launcher_on_path,
+    snap_interfaces = ({name: snap_interface_connected(name)
+                        for name in SNAP_MANUAL_INTERFACES} if snap else {})
+    return {"snap": snap, "snap_interfaces": snap_interfaces,
+            "launcher_on_path": launcher_on_path,
             "desktop_entries": desktop_entries, "nautilus": nautilus,
             "shortcut": shortcut, "shortcut_accel": shortcut_accel,
             "shortcut_fixable": shortcut_fixable,
@@ -1283,6 +1310,10 @@ def build_parser() -> argparse.ArgumentParser:
               "screen is open; there is no persistent background "
               "discovery.")
 
+    from . import __version__
+    parser.add_argument("--version", action="version",
+                        version=f"NearShare {__version__}")
+
     json_parent = argparse.ArgumentParser(add_help=False)
     json_parent.add_argument("--json", action="store_true",
                              help="print the raw JSON response")
@@ -1310,6 +1341,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_peers)
 
     p = sub.add_parser("gui", help="launch the NearShare GUI")
+    p.add_argument("--background", action="store_true",
+                   help="start without showing the window (what Start at "
+                        "login uses); does nothing if already running")
     p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser(
