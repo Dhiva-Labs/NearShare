@@ -11,19 +11,23 @@ name: CI (x64 + arm64)
 #   aur            the AUR PKGBUILD, built and run on Arch
 #   flatpak        the Flatpak bundle, x64 + arm64
 #   flatpak-test   installs the bundle with the Flathub runtime and runs it
-#   release        attaches the new packages to a published GitHub release
+#   release        on a v* tag: the GitHub release, with every package attached
+#   snap-store     on a v* tag: both snaps to the Snap Store's stable channel
+#   ppa            on a v* tag: source packages to the Launchpad PPA
 #
-# Nothing else publishes anything: the .deb and .snap files are workflow
-# artifacts only. Uploading to the Snap Store and the PPA stays a manual step
-# (see packaging/SNAP.md and packaging/PPA.md), as do the AUR and Flathub.
+# Publishing happens only for a pushed tag vX.Y.Z that matches the version in
+# the tree, and only after every build and test job above has passed. On any
+# other event the .deb and .snap files are workflow artifacts and nothing
+# leaves GitHub. snap-store and ppa skip themselves (with a notice) until
+# their secrets exist; the AUR and Flathub stay manual. See
+# packaging/RELEASING.md.
 
 on:
   push:
     branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -192,11 +196,19 @@ jobs:
           cp -r tests "$RUNNER_TEMP/pkgtests/tests"
           cd "$RUNNER_TEMP/pkgtests"
           export PYTHONPATH=/usr/share/nearshare
-          for m in test_loopback test_payload_routing test_security test_single_instance; do
+          for m in test_loopback test_payload_routing test_security test_single_instance test_transfer_control; do
             echo "::group::tests.$m"
             python3 -m "tests.$m"
             echo "::endgroup::"
           done
+
+      # postinst compiles the app: /usr/share is read-only to users, so
+      # without it every launch would recompile every module.
+      - name: The installed app has compiled bytecode and reports its version
+        run: |
+          ls /usr/share/nearshare/nearshare/__pycache__/cli.*.pyc
+          version="$(sed -n "s/^version: '\(.*\)'$/\1/p" snap/snapcraft.yaml)"
+          test "$(nearshare --version)" = "NearShare $version"
 
       - name: Start the GTK app headlessly
         run: |
@@ -263,6 +275,20 @@ jobs:
           echo "uname -m = $(uname -m)"
           test "$(uname -m)" = "$EXPECT"
 
+      # The Snap Store sometimes answers a download with an HTTP 408 or
+      # 5xx, which failed this job on otherwise good commits. Install what
+      # the build action needs here first, retrying.
+      - name: Install LXD and Snapcraft
+        run: |
+          for snap in "lxd" "snapcraft --classic"; do
+            for attempt in 1 2 3 4 5; do
+              # shellcheck disable=SC2086
+              if sudo snap install $snap; then break; fi
+              if [ "$attempt" = 5 ]; then exit 1; fi
+              sleep $((attempt * 20))
+            done
+          done
+
       - uses: snapcore/action-build@v1
         id: build
 
@@ -291,6 +317,14 @@ jobs:
           grep -F '_rust.abi3.so' "$RUNNER_TEMP/elf.txt"
           awk -v want="$FILE_ARCH" '!index($0, want) { print; n++ } END { exit (n > 0) }' \
             "$RUNNER_TEMP/elf.txt"
+          # The app ships compiled (a snap is read-only, so Python cannot
+          # cache bytecode at run time), Start at login is declared, and
+          # neither the NetworkManager daemon staged along with nmcli nor
+          # the build's pip is carried along.
+          ls "$RUNNER_TEMP"/squashfs/app/nearshare/__pycache__/cli.*.pyc
+          grep -F 'autostart: nearshare-autostart.desktop' "$RUNNER_TEMP/squashfs/meta/snap.yaml"
+          test ! -e "$RUNNER_TEMP/squashfs/usr/sbin/NetworkManager"
+          test -z "$(find "$RUNNER_TEMP/squashfs" -type d -name pip -path '*site-packages*')"
 
       - name: Install the snap
         env:
@@ -300,9 +334,15 @@ jobs:
           snap list nearshare
           snap connections nearshare
 
-      - name: nearshare --help
+      - name: nearshare --help, --version and the staged nmcli
         run: |
           snap run nearshare --help
+          version="$(sed -n "s/^version: '\(.*\)'$/\1/p" snap/snapcraft.yaml)"
+          test "$(snap run nearshare --version)" = "NearShare $version"
+          # nmcli must still load with the daemon's files pruned from the
+          # snap. It cannot reach NetworkManager until the interface is
+          # connected, so only its own start-up is checked.
+          snap run --shell nearshare -c 'nmcli --version'
 
       # Runs the same tools/gui-smoke.py as the deb job, but inside the snap's
       # confinement and against the gnome content snap's GTK4 and libadwaita.
@@ -362,12 +402,12 @@ jobs:
       - name: Package version
         id: v
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
           version="$(sed -n "s/^version: '\(.*\)'$/\1/p" snap/snapcraft.yaml)"
           test -n "$version"
           if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
-            echo "::error::release $TAG does not match version $version in snap/snapcraft.yaml"
+            echo "::error::tag $TAG does not match version $version in snap/snapcraft.yaml"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -452,7 +492,7 @@ jobs:
       - name: Source archive
         run: |
           tag="v$VERSION"
-          if [ "$GITHUB_EVENT_NAME" = release ] || git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+          if [ "$GITHUB_REF_TYPE" = tag ] || git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
             curl -fsSL -o "$RUNNER_TEMP/source.tar.gz" "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$tag.tar.gz"
           else
             echo "::notice::tag $tag does not exist yet; checking the PKGBUILD against git archive HEAD"
@@ -550,21 +590,34 @@ jobs:
           path: bundle/*.flatpak
           if-no-files-found: error
 
-  # Releases are published by hand. This attaches the new packages to a
-  # newly published release, skipping any name the release already has. On
-  # other events it only checks that every expected file was built.
+  # The GitHub release for a pushed tag: release notes taken from
+  # CHANGELOG.md, every package attached, and a SHA256SUMS file. On other
+  # events it only checks that every expected file was built, so a broken
+  # release job is found on a pull request and not on release day.
   release:
-    name: Release assets
-    needs: [test, deb, snap, packages, distros, aur, flatpak-test]
+    name: GitHub release
+    needs: [test, deb, deb-identical, snap, packages, distros, aur, flatpak-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.event.release.tag_name }}
       VERSION: ${{ needs.packages.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: nearshare-deb-built-on-x64
+          path: deb
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nearshare-snap-*
+          path: assets
+          merge-multiple: true
       - uses: actions/download-artifact@v8
         with:
           name: distros
@@ -583,25 +636,147 @@ jobs:
         with:
           name: flatpak-arm64
           path: assets
-      - name: Check the release assets
+      - name: Collect the release assets
         run: |
-          ls -l assets
-          for f in "nearshare-$VERSION-1.noarch.rpm" "nearshare-$VERSION-1-any.pkg.tar.zst" \
+          # The .deb carries its PPA revision (1.1.0~noble1); GitHub would
+          # turn the "~" into a ".", so give the download a plain name.
+          cp deb/nearshare_*_all.deb "assets/nearshare_${VERSION}_all.deb"
+          for f in "nearshare_${VERSION}_all.deb" \
+                   "nearshare_${VERSION}_amd64.snap" "nearshare_${VERSION}_arm64.snap" \
+                   "nearshare-$VERSION-1.noarch.rpm" "nearshare-$VERSION-1-any.pkg.tar.zst" \
                    "nearshare-$VERSION-aur.tar.gz" "nearshare-$VERSION-x86_64.flatpak" \
                    "nearshare-$VERSION-aarch64.flatpak"; do
             test -f "assets/$f" || { echo "::error::missing $f"; exit 1; }
           done
-          test "$(ls assets | wc -l)" -eq 5
-      - name: Upload to release ${{ github.event.release.tag_name }}
-        if: github.event_name == 'release'
+          test "$(ls assets | wc -l)" -eq 8
+          (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          ls -l assets
+      - name: Release notes from CHANGELOG.md
         run: |
-          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
-          for f in assets/*; do
-            name="$(basename "$f")"
-            if printf '%s\n' "$existing" | grep -qxF -- "$name"; then
-              echo "skip $name (already on the release)"
-            else
-              echo "upload $name"
-              gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY"
-            fi
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; if ($2 == v) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "### Install"
+            echo
+            echo '- **Snap** (any distribution): `sudo snap install nearshare`'
+            echo '- **Ubuntu 24.04 and later**: `sudo add-apt-repository ppa:dhiva-labs/apps && sudo apt install nearshare`'
+            echo '- **Other**: the `.deb`, `.rpm`, Arch package and Flatpak bundles are attached below; `SHA256SUMS` lists their checksums.'
+          } >> notes.md
+          # A release without notes means the changelog was not written.
+          test "$(grep -c . notes.md)" -gt 6
+          cat notes.md
+      - name: Publish release ${{ github.ref_name }}
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Re-run of a tag whose release already exists: refresh it.
+            gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "NearShare $VERSION" --notes-file notes.md
+          fi
+
+  # Both architectures to the Snap Store. Strict confinement passes the
+  # Store's automated review, so --release=stable takes effect at once.
+  # Needs the SNAPCRAFT_STORE_CREDENTIALS secret (packaging/RELEASING.md).
+  snap-store:
+    name: Snap Store
+    if: github.ref_type == 'tag'
+    needs: [test, deb, deb-identical, snap, packages, distros, aur, flatpak-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+    steps:
+      - name: Is the Store login configured?
+        id: cred
+        run: |
+          if [ -n "$SNAPCRAFT_STORE_CREDENTIALS" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::SNAPCRAFT_STORE_CREDENTIALS is not set; the snaps were not uploaded. See packaging/RELEASING.md."
+          fi
+      - uses: actions/download-artifact@v8
+        if: steps.cred.outputs.present == 'true'
+        with:
+          pattern: nearshare-snap-*
+          path: snaps
+          merge-multiple: true
+      - name: Install Snapcraft
+        if: steps.cred.outputs.present == 'true'
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if sudo snap install snapcraft --classic; then break; fi
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep $((attempt * 20))
           done
+      - name: Upload and release to stable
+        if: steps.cred.outputs.present == 'true'
+        run: |
+          ls -l snaps
+          test "$(ls snaps/*.snap | wc -l)" -eq 2
+          for snap in snaps/*.snap; do
+            echo "::group::$snap"
+            snapcraft upload --release=stable "$snap"
+            echo "::endgroup::"
+          done
+          snapcraft status nearshare
+
+  # Signed source packages to ppa:dhiva-labs/apps, one per Ubuntu series
+  # (packaging/ppa-upload.sh); Launchpad builds the binaries. Needs the
+  # PPA_GPG_PRIVATE_KEY secret, and PPA_GPG_PASSPHRASE if the key has one.
+  ppa:
+    name: Launchpad PPA
+    if: github.ref_type == 'tag'
+    needs: [test, deb, deb-identical, snap, packages, distros, aur, flatpak-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+      PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+    steps:
+      - name: Is the signing key configured?
+        id: key
+        run: |
+          if [ -n "$PPA_GPG_PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::PPA_GPG_PRIVATE_KEY is not set; nothing was uploaded to the PPA. See packaging/RELEASING.md."
+          fi
+      - uses: actions/checkout@v7
+        if: steps.key.outputs.present == 'true'
+      - name: Install the packaging tools
+        if: steps.key.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper devscripts dpkg-dev dput gnupg python3-grpc-tools
+      - name: Import the signing key
+        if: steps.key.outputs.present == 'true'
+        id: gpg
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$PPA_GPG_PRIVATE_KEY" | gpg --batch --import
+          fpr="$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test -n "$fpr"
+          umask 077
+          printf '%s' "$PPA_GPG_PASSPHRASE" > "$RUNNER_TEMP/ppa-passphrase"
+          echo "home=$GNUPGHOME" >> "$GITHUB_OUTPUT"
+          echo "fpr=$fpr" >> "$GITHUB_OUTPUT"
+      - name: Build, sign and upload the source packages
+        if: steps.key.outputs.present == 'true'
+        env:
+          GNUPGHOME: ${{ steps.gpg.outputs.home }}
+          PPA_KEY: ${{ steps.gpg.outputs.fpr }}
+          PPA_GPG_PASSPHRASE_FILE: ${{ runner.temp }}/ppa-passphrase
+        run: packaging/ppa-upload.sh
+      - name: Remove the key material
+        if: always() && steps.key.outputs.present == 'true'
+        run: rm -rf "$RUNNER_TEMP/gnupg" "$RUNNER_TEMP/ppa-passphrase"

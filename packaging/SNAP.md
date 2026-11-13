@@ -54,10 +54,8 @@ each of them:
 - uploads the `.snap` as the `nearshare-snap-amd64` / `nearshare-snap-arm64`
   workflow artifact.
 
-CI never talks to the Snap Store. To put the arm64 build on the Store, take
-the artifact from a green run on the commit you are releasing (or build it
-on an arm64 machine), check that its version matches the amd64 revision,
-then upload it to the same channel:
+On a pushed `v*` tag the same workflow uploads both snaps to the Store's
+`stable` channel (see [RELEASING.md](RELEASING.md)). To upload one by hand:
 
 ```bash
 snapcraft upload --release=stable ./nearshare_<version>_arm64.snap
@@ -233,15 +231,14 @@ integration, use the `.deb` or a from-source install instead (see
 
 ## Publishing to the Snap Store
 
+CI does this for every release tag; [RELEASING.md](RELEASING.md) has the
+one-time setup. By hand:
+
 ```bash
 snapcraft login
-snapcraft register nearshare
-snapcraft upload --release=stable ./nearshare_1.0.0_amd64.snap
+snapcraft upload --release=stable ./nearshare_<version>_amd64.snap
+snapcraft upload --release=stable ./nearshare_<version>_arm64.snap
 ```
-
-(`upload` used to be `push`; if your snapcraft is old enough to only know
-`push`, use `snapcraft push --release=stable ./nearshare_1.0.0_amd64.snap`
-instead. This project builds with snapcraft 9.0.1, which uses `upload`.)
 
 **Strict confinement, as configured here, passes automated review and can
 go straight to the `stable` channel with no human review wait** -- that's
@@ -278,3 +275,21 @@ rsvg-convert -w 256 -h 256 data/icons/dev.dhivalabs.nearshare.svg -o snap/gui/ic
 
 This wasn't done proactively since the current `icon:` value builds fine
 as-is (see [Build](#build)) and no SVG rejection was actually observed.
+
+## What the snap does beyond the plain package
+
+- **Start at login.** The `gui` app declares
+  `autostart: nearshare-autostart.desktop`. Turning on *Start at login* in
+  Preferences writes that file to `$SNAP_USER_DATA/.config/autostart/`,
+  and snapd's session agent then runs `nearshare.gui --background` at
+  login. A confined snap cannot write `~/.config/autostart` itself.
+- **Compiled bytecode.** The image is read-only, so Python cannot write
+  `__pycache__` at run time. The build compiles the app with
+  `--invalidation-mode unchecked-hash`; without it every launch recompiled
+  every module.
+- **Only `nmcli` from NetworkManager.** `stage-packages: network-manager`
+  brings the whole daemon; the `nmcli` part primes just `usr/bin/nmcli`
+  and `libnm`. The build's `pip` is removed too.
+- **Interface hints in the app.** `snapctl is-connected bluez` (and
+  `network-manager`) tells the app which interface is missing; the setup
+  row shows the exact `snap connect` command with a copy button.
